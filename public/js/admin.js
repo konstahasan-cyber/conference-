@@ -79,16 +79,27 @@ function fmtSize(b) {
   return (b / 1e6).toFixed(1) + ' МБ';
 }
 
+// 1 просмотр, 2 просмотра, 5 просмотров
+function viewsText(n) {
+  const m10 = n % 10, m100 = n % 100;
+  const word = m10 === 1 && m100 !== 11 ? 'просмотр' : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? 'просмотра' : 'просмотров';
+  return `${n} ${word}`;
+}
+
 async function loadRecordings() {
   recordings = await api('/api/recordings');
   $('#recEmpty').classList.toggle('hidden', recordings.length > 0);
   $('#recBody').innerHTML = recordings.slice().reverse().map((r) => `<tr>
-    <td><div class="row nowrap">${ic('film', 'sm')}<b>${esc(r.title)}</b></div></td>
+    <td><div class="row nowrap">${ic('film', 'sm')}<b>${esc(r.title)}</b>${r.shareToken ? `<span class="badge accent" style="white-space:nowrap" title="Запись доступна по публичной ссылке">${ic('eye', 'sm')}открыта · ${viewsText(r.views || 0)}</span>` : ''}</div></td>
     <td>${r.duration ? fmtTime(r.duration) : '<span class="muted">?</span>'}</td>
     <td>${fmtSize(r.size)}</td>
     <td class="small muted">${fmtDate(r.createdAt)}</td>
     <td style="text-align:right;white-space:nowrap">
       <button class="btn sm" data-view="${r.id}">${ic('play', 'sm')} Смотреть</button>
+      ${r.shareToken
+        ? `<button class="btn sm icon" data-share="${r.id}" title="Скопировать публичную ссылку">${ic('link', 'sm')}</button>
+      <button class="btn sm" data-unshare="${r.id}" title="Ссылка перестанет работать">${ic('ban', 'sm')} Закрыть доступ</button>`
+        : `<button class="btn sm" data-share="${r.id}" title="Ссылка на страницу просмотра без регистрации">${ic('link', 'sm')} Поделиться</button>`}
       <button class="btn sm icon" data-rename="${r.id}" title="Переименовать">${ic('pencil', 'sm')}</button>
       <button class="btn sm icon danger" data-del="${r.id}" title="Удалить">${ic('trash-2', 'sm')}</button>
     </td></tr>`).join('');
@@ -97,9 +108,26 @@ async function loadRecordings() {
 $('#recBody').onclick = async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  const rec = recordings.find((r) => r.id === (b.dataset.view || b.dataset.rename || b.dataset.del));
+  const rec = recordings.find((r) => r.id === (b.dataset.view || b.dataset.rename || b.dataset.del || b.dataset.share || b.dataset.unshare));
   if (!rec) return;
-  if (b.dataset.view) {
+  if (b.dataset.share) {
+    try {
+      const { url } = await api(`/api/recordings/${rec.id}/share`, { method: 'POST' });
+      const link = location.origin + url;
+      try {
+        await navigator.clipboard.writeText(link);
+        toast('Ссылка скопирована — её можно отправить кому угодно, смотреть можно без регистрации', 5000);
+      } catch {
+        prompt('Скопируйте ссылку — смотреть можно без регистрации', link);
+      }
+      if (!rec.shareToken) loadRecordings();
+    } catch (err) { toast(err.message); }
+  } else if (b.dataset.unshare) {
+    if (!confirm(`Закрыть доступ к «${rec.title}»? Ссылка перестанет работать.`)) return;
+    await api(`/api/recordings/${rec.id}/share`, { method: 'DELETE' });
+    toast('Доступ по ссылке закрыт');
+    loadRecordings();
+  } else if (b.dataset.view) {
     $('#previewCard').classList.remove('hidden');
     $('#previewTitle').textContent = rec.title;
     $('#previewVideo').src = pickMediaUrl(`/media/${rec.file}`, rec.altFile && `/media/${rec.altFile}`);

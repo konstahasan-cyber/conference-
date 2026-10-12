@@ -312,7 +312,8 @@ app.post('/api/recordings/:id/share', requireAdmin, (req, res) => {
   const rec = ownRecording(req.user, req.params.id);
   if (!rec) return res.status(404).json({ error: 'Не найдено' });
   const token = rec.shareToken || crypto.randomBytes(9).toString('base64url');
-  db.updateRecording(rec.id, { shareToken: token });
+  // у новой ссылки счётчик просмотров начинается заново
+  db.updateRecording(rec.id, rec.shareToken ? {} : { shareToken: token, views: 0 });
   res.json({ token, url: `/v/${token}` });
 });
 app.delete('/api/recordings/:id/share', requireAdmin, (req, res) => {
