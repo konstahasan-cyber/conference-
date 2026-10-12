@@ -110,7 +110,8 @@ TURN_USER="${TURN_USER:-meet}"
 TURN_PASS="${TURN_PASS:-$(randstr 24)}"
 
 # свободный порт для приложения (при обновлении оставляем прежний)
-if [ "$FIRST_INSTALL" = 1 ] || [ -z "${PORT:-}" ]; then
+# наш сервис уже остановлен выше, так что занятый порт — это чужая программа: берём другой
+if [ "$FIRST_INSTALL" = 1 ] || [ -z "${PORT:-}" ] || port_busy "$PORT"; then
   PORT=3000
   while port_busy "$PORT"; do PORT=$((PORT + 1)); done
 fi
@@ -228,6 +229,9 @@ systemctl enable conference >/dev/null 2>&1
 systemctl restart conference
 sleep 3
 systemctl is-active --quiet conference || { journalctl -u conference -n 30 --no-pager; die "приложение не запустилось"; }
+# убеждаемся, что на порту отвечает именно наше приложение
+curl -fsS --max-time 5 "http://$UPSTREAM_HOST:$PORT/api/me" | grep -q '"admin"' \
+  || { journalctl -u conference -n 30 --no-pager; die "приложение не отвечает на $UPSTREAM_HOST:$PORT"; }
 
 SITE_BLOCK="$DOMAIN {
 	encode gzip
@@ -264,19 +268,29 @@ elif [ -n "$CADDY_CONTAINER" ]; then
   echo "Конфиг Caddy: $CFG (на сервере: ${SRC:-не найден})"
   if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
     HTTPS_OK=0
-  elif grep -qF "$DOMAIN {" "$SRC"; then
-    echo "Сайт $DOMAIN уже есть в $SRC — оставляю как есть."
-    docker exec "$CADDY_CONTAINER" caddy reload --config "$CFG" >/dev/null 2>&1 || true
   else
     BACKUP="$SRC.bak-$(date +%Y%m%d-%H%M%S)"
     cp -p "$SRC" "$BACKUP"
     echo "Резервная копия: $BACKUP"
-    printf '\n# --- видеовстречи (conference) ---\n%s\n' "$SITE_BLOCK" >> "$SRC"
+    if grep -qxF "$DOMAIN {" "$SRC"; then
+      # сайт уже добавлен прошлым запуском — обновляем адрес приложения внутри его блока
+      awk -v d="$DOMAIN {" -v up="$UPSTREAM_HOST:$PORT" '
+        $0 == d { inb = 1 }
+        inb && $1 == "reverse_proxy" { sub(/reverse_proxy.*/, "reverse_proxy " up) }
+        inb && $0 == "}" { inb = 0 }
+        { print }' "$BACKUP" > "$SRC.new"
+      cat "$SRC.new" > "$SRC"    # пишем поверх, чтобы не сломать bind-mount файла
+      rm -f "$SRC.new"
+      ACTION="обновлён"
+    else
+      printf '\n# --- видеовстречи (conference) ---\n%s\n' "$SITE_BLOCK" >> "$SRC"
+      ACTION="добавлен"
+    fi
     if docker exec "$CADDY_CONTAINER" caddy validate --config "$CFG" --adapter caddyfile >/dev/null 2>&1 \
        && docker exec "$CADDY_CONTAINER" caddy reload --config "$CFG" --adapter caddyfile >/dev/null 2>&1; then
-      echo "Caddy перезагружен, сайт добавлен. Остальные сайты продолжают работать."
+      echo "Caddy перезагружен, сайт $DOMAIN $ACTION (-> $UPSTREAM_HOST:$PORT). Остальные сайты продолжают работать."
     else
-      cat "$BACKUP" > "$SRC"     # пишем поверх, чтобы не сломать bind-mount файла
+      cat "$BACKUP" > "$SRC"
       docker exec "$CADDY_CONTAINER" caddy reload --config "$CFG" >/dev/null 2>&1 || true
       warn "Caddy не принял новый конфиг — вернул прежний."
       HTTPS_OK=0
