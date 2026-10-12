@@ -18,6 +18,8 @@ if (!process.env.ADMIN_PASSWORD) {
 }
 
 const app = express();
+// за обратным прокси (Caddy/nginx) берём настоящий IP клиента из X-Forwarded-For
+app.set('trust proxy', 'loopback');
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1e6 });
 
@@ -745,7 +747,7 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, process.env.HOST || undefined, () => {
   const url = `http://localhost:${PORT}/admin`;
   console.log(`Сервер запущен: http://localhost:${PORT}`);
   console.log(`Админ-панель:   ${url}`);

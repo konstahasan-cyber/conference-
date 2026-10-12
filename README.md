@@ -50,7 +50,16 @@ ADMIN_PASSWORD='ваш-надёжный-пароль' npm start
 | `MAX_UPLOAD_MB` | максимальный размер видео | `4096` |
 | `TURN_URL`, `TURN_USER`, `TURN_PASS` | TURN-сервер, если участники не видят друг друга | — |
 
-## Размещение в интернете
+## Установка на сервер Ubuntu 24.04 одной командой
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/konstahasan-cyber/conference-/claude/video-conference-recording-service-4y8f5m/deploy/install.sh -o install.sh
+sudo bash install.sh
+```
+
+Скрипт спросит домен (если домена нет, нажмите Enter: будет бесплатный адрес вида `1-2-3-4.sslip.io`) и пароль админки. Затем он поставит Node.js, ffmpeg, Caddy с автоматическим HTTPS, TURN-сервер coturn, настроит автозапуск и файрвол. Повторный запуск `sudo bash /opt/conference/deploy/install.sh` обновляет код и сохраняет настройки и данные.
+
+## Размещение в интернете вручную
 
 1. **Нужен HTTPS**: без него браузеры не дают доступ к камере и микрофону (кроме `localhost`). Проще всего поставить перед сервисом Caddy:
    ```
