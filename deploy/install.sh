@@ -68,14 +68,23 @@ if [ "$MODE" = external ]; then
     echo "Отключён лишний системный Caddy от прошлой попытки установки."
   fi
   if command -v docker >/dev/null; then
-    CADDY_CONTAINER="$(docker ps --format '{{.Names}} {{.Image}}' | awk '$2 ~ /caddy/ {print $1; exit}')"
+    # среди всех Caddy-контейнеров выбираем тот, что реально держит порты 80/443 хоста:
+    # либо в сети хоста (network_mode: host), либо с публикацией портов 80/443 наружу
+    for c in $(docker ps --format '{{.Names}} {{.Image}}' | awk '$2 ~ /caddy/ {print $1}'); do
+      NETMODE="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$c")"
+      PUBLISHED="$(docker port "$c" 2>/dev/null | grep -E -- '-> (0\.0\.0\.0|\[::\]|):(80|443)$' || true)"
+      if [ "$NETMODE" = host ] || [ -n "$PUBLISHED" ]; then CADDY_CONTAINER="$c"; break; fi
+    done
   fi
   if [ -n "$CADDY_CONTAINER" ]; then
-    echo "Найден Caddy в Docker: $CADDY_CONTAINER"
-    # приложение слушает на IP моста Docker — контейнер его видит, из интернета порт недоступен
-    UPSTREAM_HOST="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' "$CADDY_CONTAINER" | awk '{print $1}')"
-    # контейнер в режиме network_mode: host — достаточно localhost
-    [ -n "$UPSTREAM_HOST" ] || UPSTREAM_HOST=127.0.0.1
+    echo "Порты 80/443 обслуживает Caddy в Docker: $CADDY_CONTAINER"
+    if [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CADDY_CONTAINER")" = host ]; then
+      UPSTREAM_HOST=127.0.0.1
+    else
+      # приложение слушает на IP моста Docker — контейнер его видит, из интернета порт недоступен
+      UPSTREAM_HOST="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' "$CADDY_CONTAINER" | awk '{print $1}')"
+      [ -n "$UPSTREAM_HOST" ] || UPSTREAM_HOST=127.0.0.1
+    fi
   fi
 fi
 
@@ -242,27 +251,33 @@ if [ "$MODE" = own ]; then
 
 elif [ -n "$CADDY_CONTAINER" ]; then
   say "Добавляю сайт в существующий Caddy ($CADDY_CONTAINER)"
-  SRC="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' "$CADDY_CONTAINER")"
-  if [ -z "$SRC" ]; then
-    DIR="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/caddy"}}{{.Source}}{{end}}{{end}}' "$CADDY_CONTAINER")"
-    [ -n "$DIR" ] && SRC="$DIR/Caddyfile"
-  fi
+  # путь к конфигу внутри контейнера (из «caddy run --config ...»), по умолчанию /etc/caddy/Caddyfile
+  CFG="$(docker inspect -f '{{range .Config.Cmd}}{{.}} {{end}}' "$CADDY_CONTAINER" | awk '{for(i=1;i<NF;i++) if($i=="--config"){print $(i+1); exit}}')"
+  CFG="${CFG:-/etc/caddy/Caddyfile}"
+  # находим, какой файл на хосте подключён к этому пути
+  SRC=""
+  while read -r MSRC MDST; do
+    [ -n "$MDST" ] || continue
+    if [ "$CFG" = "$MDST" ]; then SRC="$MSRC"; break; fi
+    case "$CFG" in "$MDST"/*) SRC="$MSRC${CFG#"$MDST"}"; break ;; esac
+  done < <(docker inspect -f '{{range .Mounts}}{{.Source}} {{.Destination}}{{"\n"}}{{end}}' "$CADDY_CONTAINER")
+  echo "Конфиг Caddy: $CFG (на сервере: ${SRC:-не найден})"
   if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
     HTTPS_OK=0
   elif grep -qF "$DOMAIN {" "$SRC"; then
     echo "Сайт $DOMAIN уже есть в $SRC — оставляю как есть."
-    docker exec "$CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+    docker exec "$CADDY_CONTAINER" caddy reload --config "$CFG" >/dev/null 2>&1 || true
   else
     BACKUP="$SRC.bak-$(date +%Y%m%d-%H%M%S)"
     cp -p "$SRC" "$BACKUP"
     echo "Резервная копия: $BACKUP"
     printf '\n# --- видеовстречи (conference) ---\n%s\n' "$SITE_BLOCK" >> "$SRC"
-    if docker exec "$CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 \
-       && docker exec "$CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+    if docker exec "$CADDY_CONTAINER" caddy validate --config "$CFG" --adapter caddyfile >/dev/null 2>&1 \
+       && docker exec "$CADDY_CONTAINER" caddy reload --config "$CFG" --adapter caddyfile >/dev/null 2>&1; then
       echo "Caddy перезагружен, сайт добавлен. Остальные сайты продолжают работать."
     else
       cat "$BACKUP" > "$SRC"     # пишем поверх, чтобы не сломать bind-mount файла
-      docker exec "$CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+      docker exec "$CADDY_CONTAINER" caddy reload --config "$CFG" >/dev/null 2>&1 || true
       warn "Caddy не принял новый конфиг — вернул прежний."
       HTTPS_OK=0
     fi
