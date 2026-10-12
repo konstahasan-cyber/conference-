@@ -312,3 +312,39 @@ img.emoji-inline { height: 1.45em; width: auto; vertical-align: -0.35em; margin:
 .reaction img { width: 54px; height: 54px; object-fit: contain; display: block; }
 .reaction .who { display: block; text-align: center; font-size: 11px; background: rgba(0, 0, 0, .55); border-radius: 6px; padding: 1px 6px; margin-top: 2px; white-space: nowrap; }
 @keyframes floatup { 0% { transform: translateY(20px) scale(.4); opacity: 0; } 12% { transform: translateY(0) scale(1.15); opacity: 1; } 20% { transform: scale(1); } 80% { opacity: 1; } 100% { transform: translateY(-150px) scale(.95); opacity: 0; } }
+
+/* ---------- Просмотр записи ---------- */
+.i.i-download { --ic: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 15V3'/%3E%3Cpath d='m7 10 5 5 5-5'/%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3C/svg%3E"); }
+/* плеер не выше экрана: заголовок остаётся видимым без прокрутки */
+.watch-wrap { width: 100%; max-width: clamp(672px, calc((100vh - 285px) * 16 / 9 + 32px), 1112px); margin: 0 auto; padding-left: 16px; padding-right: 16px; }
+.watch-top { padding: 14px 0; border-bottom: 1px solid var(--line); background: rgba(10, 12, 17, .6); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); position: sticky; top: 0; z-index: 10; }
+.watch-top .watch-wrap { justify-content: space-between; }
+.watch-main { padding-top: 24px; padding-bottom: 48px; }
+.watch-player { position: relative; aspect-ratio: 16 / 9; width: 100%; background: #000; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); box-shadow: 0 24px 70px rgba(0, 0, 0, .55), 0 0 0 1px rgba(124, 108, 255, .06); }
+.watch-player video { width: 100%; height: 100%; display: block; object-fit: contain; background: #000; }
+.watch-player.skeleton { display: flex; align-items: center; justify-content: center; background: var(--surface); }
+.watch-skel-line { height: 16px; border-radius: 8px; background: var(--surface-2); margin-top: 18px; animation: pulse 1.6s infinite; }
+.watch-resume { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 18px; border-radius: 14px; background: rgba(10, 12, 17, .72); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid var(--line-2); box-shadow: var(--shadow); }
+.watch-resume .btn.ghost { color: var(--muted); }
+.watch-vid-error { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 20px; background: rgba(10, 12, 17, .9); color: var(--muted); }
+.watch-info { margin-top: 20px; }
+.watch-info h1 { color: var(--text); font-size: 24px; line-height: 1.25; margin: 0 0 16px; word-wrap: break-word; }
+.watch-meta { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.watch-author { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.watch-avatar { width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; flex: none; font-size: 15px; }
+.watch-author-name { font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; }
+.watch-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.watch-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.watch-chip { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--line); color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.watch-error { min-height: calc(100% - 64px); }
+.watch-error .card { max-width: 420px; width: 100%; text-align: center; padding: 34px 26px; }
+.watch-error h2 { margin: 0; }
+.watch-error-icon { width: 64px; height: 64px; margin: 0 auto; border-radius: 18px; display: flex; align-items: center; justify-content: center; background: var(--grad-soft); border: 1px solid rgba(124, 108, 255, .3); color: #b8afff; }
+@media (max-width: 600px) {
+  .watch-main { padding-top: 16px; }
+  .watch-player { border-radius: 12px; }
+  .watch-info h1 { font-size: 19px; }
+  .watch-actions { width: 100%; }
+  .watch-actions .btn { flex: 1; }
+  .watch-kind { display: none; }
+}

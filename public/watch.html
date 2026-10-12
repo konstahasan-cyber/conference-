@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07080c">
+  <meta name="robots" content="noindex">
+  <title>Запись встречи</title>
+  <link rel="icon" href="/icons/video.svg">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="glow">
+
+<header class="watch-top">
+  <div class="watch-wrap row nowrap">
+    <div class="logo"><span class="mark"><i data-ic="video"></i></span><span>Встречи</span></div>
+    <span class="badge accent watch-kind"><i data-ic="film" class="sm"></i> Запись встречи</span>
+  </div>
+</header>
+
+<!-- Загрузка -->
+<main id="loadingView" class="watch-wrap watch-main">
+  <div class="watch-player skeleton"><div class="spinner"></div></div>
+  <div class="watch-skel-line" style="width:55%"></div>
+  <div class="watch-skel-line" style="width:30%"></div>
+</main>
+
+<!-- Плеер -->
+<main id="playerView" class="watch-wrap watch-main hidden">
+  <div class="watch-player">
+    <video id="video" controls playsinline preload="metadata"></video>
+    <div class="watch-resume hidden" id="resumeBox">
+      <button class="btn primary" id="resumeBtn"><i data-ic="play" class="sm"></i><span id="resumeText">Продолжить</span></button>
+      <button class="btn ghost sm" id="resumeNo" title="Смотреть с начала"><i data-ic="rotate-ccw" class="sm"></i>С начала</button>
+    </div>
+    <div class="watch-vid-error hidden" id="vidError">
+      <i data-ic="triangle-alert" class="xl"></i>
+      <div>Не удалось воспроизвести видео в этом браузере</div>
+      <a class="btn sm" id="vidErrorDl" download><i class="i sm i-download"></i>Скачать файл</a>
+    </div>
+  </div>
+
+  <section class="watch-info">
+    <h1 id="title"></h1>
+    <div class="watch-meta">
+      <div class="watch-author">
+        <div id="authorAvatar"></div>
+        <div>
+          <div class="muted small">Ведущий</div>
+          <div class="watch-author-name" id="author"></div>
+        </div>
+      </div>
+      <div class="watch-actions">
+        <button class="btn" id="copyBtn"><i data-ic="link" class="sm"></i><span>Скопировать ссылку</span></button>
+        <a class="btn" id="downloadBtn" download><i class="i sm i-download"></i><span>Скачать</span></a>
+      </div>
+    </div>
+    <div class="watch-chips">
+      <span class="watch-chip"><i data-ic="calendar-clock" class="sm"></i><span id="date"></span></span>
+      <span class="watch-chip" id="durChip"><i data-ic="clock" class="sm"></i><span id="duration"></span></span>
+    </div>
+  </section>
+</main>
+
+<!-- Ошибка -->
+<div id="errorView" class="center-page watch-error hidden">
+  <div class="card glass stack">
+    <div class="watch-error-icon"><i data-ic="lock" class="xl"></i></div>
+    <h2>Запись недоступна</h2>
+    <div class="muted" id="errorText">Ссылка устарела или доступ закрыт. Попросите ведущего прислать новую ссылку.</div>
+  </div>
+</div>
+
+<script src="/js/common.js"></script>
+<script src="/js/watch.js"></script>
+</body>
+</html>

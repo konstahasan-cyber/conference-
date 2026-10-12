@@ -113,6 +113,8 @@
     <div class="row nowrap"><i data-ic="mic" class="sm muted"></i><div class="level grow"><div id="devLevel"></div></div></div>
     <label class="field"><span>Камера</span><select id="devCam"></select></label>
     <label class="field" id="devSpkWrap"><span>Динамики</span><select id="devSpk"></select></label>
+    <div class="row nowrap"><button class="btn sm" id="connTestBtn" type="button"><i data-ic="radio" class="sm"></i> Проверить связь</button></div>
+    <div id="connTestResult" class="small"></div>
     <div class="small muted">Если браузер не даёт доступ — нажмите на значок замка слева от адреса сайта и разрешите камеру и микрофон.</div>
     <button class="btn primary" id="devDone">Готово</button>
   </div>
@@ -131,11 +133,20 @@
   </div>
 </div>
 
+<!-- Обрыв связи: переподключаемся -->
+<div id="reconnectBanner" class="card glass row nowrap hidden" role="status" aria-live="polite" style="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:150;gap:12px;padding:12px 18px;max-width:calc(100% - 32px)">
+  <div class="spinner" style="width:22px;height:22px;border-width:3px;margin:0;flex:none"></div>
+  <b>Связь потеряна — переподключаемся…</b>
+</div>
+
 <button class="btn primary lg unmute-banner hidden" id="unmuteBtn"><i data-ic="volume-2"></i> Нажмите, чтобы включить звук</button>
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="/js/emoji-data.js"></script>
 <script src="/js/common.js"></script>
+<script src="/js/net-quality.js"></script>
+<script src="/js/playback-sync.js"></script>
+<script src="/js/conn-test.js"></script>
 <script src="/js/room.js"></script>
 </body>
 </html>

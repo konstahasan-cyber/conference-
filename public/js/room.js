@@ -25,7 +25,16 @@ const S = {
   isOwner: false,
   isAdmin: false,
   observer: false,
+  rejoin: null,              // токен возвращения после обрыва связи
+  reconnecting: false,
+  waiting: false,
 };
+const REJOIN_KEY = `rejoin:${roomId}`;
+try { S.rejoin = sessionStorage.getItem(REJOIN_KEY) || null; } catch (e) {}
+function saveRejoin(token) {
+  S.rejoin = token || null;
+  try { token ? sessionStorage.setItem(REJOIN_KEY, token) : sessionStorage.removeItem(REJOIN_KEY); } catch (e) {}
+}
 let audioCtx = null;
 const blockedMedia = new Set();
 
@@ -113,7 +122,7 @@ function mediaError(kind, e) {
 async function startLocal(kind) {
   const id = kind === 'video' ? S.dev.cam : S.dev.mic;
   const base = kind === 'video'
-    ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+    ? (window.NetQuality?.videoConstraints?.(S.isOwner ? 'host' : S.role) || { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } })
     : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
   const get = (withId) => navigator.mediaDevices.getUserMedia({ [kind]: withId && id ? { ...base, deviceId: { exact: id } } : base });
   try {
@@ -187,6 +196,22 @@ async function openDevices() {
   if (!list.some((d) => d.label)) $('#devMic').insertAdjacentHTML('beforeend', '');
 }
 const closeDevices = () => $('#devicesModal').classList.add('hidden');
+// проверка связи (модуль conn-test.js)
+$('#connTestBtn').onclick = async () => {
+  const box = $('#connTestResult');
+  if (!window.ConnTest?.run) { box.textContent = 'Проверка связи недоступна'; return; }
+  const btn = $('#connTestBtn');
+  btn.disabled = true;
+  box.innerHTML = '<span class="muted small">Проверяем связь… это займёт несколько секунд</span>';
+  try {
+    const res = await window.ConnTest.run(S.iceServers);
+    if (window.ConnTest.render) window.ConnTest.render(box, res);
+    else box.textContent = JSON.stringify(res);
+  } catch (e) {
+    box.textContent = 'Не удалось проверить связь';
+  }
+  btn.disabled = false;
+};
 $('#devClose').onclick = $('#devDone').onclick = closeDevices;
 $('#devicesModal').onclick = (e) => { if (e.target.id === 'devicesModal') closeDevices(); };
 $('#devMic').onchange = async () => {
@@ -212,17 +237,73 @@ $('#joinBtn').onclick = () => {
   ensureAudioCtx();
   pbVideo.muted = true; pbVideo.play().catch(() => {}); pbVideo.pause(); pbVideo.muted = false;
   $('#joinBtn').disabled = true;
-  socket.emit('join', { roomId, name, asHost: S.isOwner, hidden: S.observer }, (res) => {
+  S.joinName = name;
+  // если страницу перезагрузили в течение 3 минут — токен вернёт во встречу без зала ожидания
+  socket.emit('join', { roomId, name, asHost: S.isOwner, hidden: S.observer, rejoin: S.rejoin || undefined }, (res) => {
     $('#joinBtn').disabled = false;
     if (res?.error) { $('#preError').textContent = res.error; return; }
-    if (res.status === 'waiting') {
-      $('#waitTitle').textContent = $('#preTitle').textContent;
-      show('waiting');
-    }
+    if (res.status === 'waiting') showWaiting();
   });
 };
 
-$('#cancelWait').onclick = () => { socket.emit('leave'); show('prejoin'); };
+function showWaiting() {
+  S.waiting = true;
+  $('#waitTitle').textContent = $('#preTitle').textContent;
+  show('waiting');
+}
+
+$('#cancelWait').onclick = () => { S.waiting = false; socket.emit('leave'); show('prejoin'); };
+
+// ---------- Переподключение ----------
+// при обрыве связи не выкидываем из встречи: ждём, пока socket.io переподключится, и входим по токену
+let reconnectTimer = null;
+function setReconnectBanner(on) { $('#reconnectBanner').classList.toggle('hidden', !on); }
+
+function startReconnecting() {
+  S.reconnecting = true;
+  for (const id of [...S.peers.keys()]) removePeer(id);
+  setReconnectBanner(true);
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    if (!S.reconnecting) return;
+    stopReconnecting();
+    showEnd('Соединение прервано', 'Проверьте интернет и подключитесь снова.');
+  }, 60_000);
+}
+
+function stopReconnecting() {
+  S.reconnecting = false;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  setReconnectBanner(false);
+}
+
+function rejoinRoom() {
+  socket.emit('join', { roomId, name: S.self?.name || S.joinName, asHost: S.isOwner, hidden: S.observer, rejoin: S.rejoin || undefined }, (res) => {
+    if (res?.error) {
+      stopReconnecting();
+      saveRejoin(null);
+      return showEnd('Не удалось вернуться во встречу', res.error);
+    }
+    if (res?.status === 'waiting') {
+      // токен истёк, а в комнате зал ожидания — ждём снова
+      stopReconnecting();
+      S.joined = false;
+      showWaiting();
+    }
+  });
+}
+
+socket.on('connect', () => {
+  if (S.reconnecting) rejoinRoom();
+  else if (S.waiting && !S.joined) {
+    // обрыв в зале ожидания — встаём в очередь заново
+    socket.emit('join', { roomId, name: S.joinName, asHost: S.isOwner, hidden: S.observer }, (res) => {
+      if (res?.error) { S.waiting = false; showEnd('Соединение прервано', res.error); }
+      else if (res?.status === 'waiting') showWaiting();
+    });
+  }
+});
 
 function show(view) {
   for (const v of ['prejoin', 'waiting', 'meeting', 'end']) $(`#${v}View`).classList.toggle('hidden', v !== view);
@@ -231,7 +312,9 @@ function show(view) {
 function showEnd(title, text) {
   if (REC.recorder) stopHostRecording();
   S.joined = false;
-  for (const peer of S.peers.values()) peer.pc?.close();
+  S.waiting = false;
+  stopReconnecting();
+  for (const peer of S.peers.values()) { clearTimeout(peer.iceTimer); peer.pc?.close(); }
   S.peers.clear();
   stopLocal('video'); stopLocal('audio'); stopLocal('screen');
   pbVideo.pause();
@@ -244,11 +327,18 @@ function showEnd(title, text) {
 }
 
 // ---------- Встреча ----------
-socket.on('joined', ({ self, peers, room, playback, chat }) => {
+socket.on('joined', ({ self, peers, room, playback, chat, rejoin }) => {
+  const again = S.joined; // повторный вход после обрыва связи
+  stopReconnecting();
+  S.waiting = false;
   S.joined = true;
   S.self = self;
   S.role = self.role;
-  S.joinedAt = Date.now();
+  S.observer = !!self.hidden;
+  if (!again) S.joinedAt = Date.now();
+  saveRejoin(rejoin);
+  // старые соединения (если остались) закрываем — заново звоним всем
+  for (const id of [...S.peers.keys()]) removePeer(id);
   S.perms = { allowCam: self.allowCam, allowMic: self.allowMic };
   if (self.hidden) { stopLocal('video'); stopLocal('audio'); }
   if (!S.perms.allowCam) stopLocal('video');
@@ -268,7 +358,9 @@ socket.on('joined', ({ self, peers, room, playback, chat }) => {
   for (const info of peers) callPeer(info.id);
   applyPlayback(playback);
   sendMedia();
+  if (again && S.hand) socket.emit('hand', true);
   updateButtons();
+  tuneNet();
   if (host) {
     socket.emit('admin:watch', { roomId });
     api('/api/recordings').then((r) => { S.recordings = r; renderManage(); }).catch(() => {});
@@ -276,15 +368,18 @@ socket.on('joined', ({ self, peers, room, playback, chat }) => {
   layout();
 });
 
-socket.on('denied', () => showEnd('Вход отклонён', 'Организатор не разрешил вам присоединиться к встрече.'));
-socket.on('kicked', () => showEnd('Вы удалены из встречи', 'Организатор удалил вас из встречи.'));
-socket.on('meeting-ended', ({ reason } = {}) => showEnd('Встреча завершена', reason));
-socket.on('disconnect', () => {
-  if (S.joined) showEnd('Соединение прервано', 'Проверьте интернет и подключитесь снова.');
-  else if (!$('#waitingView').classList.contains('hidden')) showEnd('Соединение прервано', 'Попробуйте подключиться снова.');
+socket.on('denied', () => { saveRejoin(null); showEnd('Вход отклонён', 'Организатор не разрешил вам присоединиться к встрече.'); });
+socket.on('kicked', () => { saveRejoin(null); showEnd('Вы удалены из встречи', 'Организатор удалил вас из встречи.'); });
+socket.on('meeting-ended', ({ reason } = {}) => { saveRejoin(null); showEnd('Встреча завершена', reason); });
+socket.on('disconnect', (reason) => {
+  if (S.joined) {
+    if (!S.reconnecting) startReconnecting();
+  } else if (!S.waiting) return;
+  // сервер сам закрыл сокет — socket.io в этом случае не переподключается автоматически
+  if (reason === 'io server disconnect') socket.connect();
 });
 
-socket.on('peer-joined', (info) => { addPeer(info); layout(); });
+socket.on('peer-joined', (info) => { addPeer(info); layout(); tuneNet(); });
 socket.on('peer-left', ({ id }) => removePeer(id));
 socket.on('peer-updated', (info) => {
   if (info.id === socket.id) {
@@ -377,12 +472,20 @@ function addPeer(info) {
 function removePeer(id) {
   const peer = S.peers.get(id);
   if (!peer) return;
+  clearTimeout(peer.iceTimer);
   peer.pc?.close();
   S.peers.delete(id);
   const t = S.tiles.get(id);
   if (t) { t.el.remove(); S.tiles.delete(id); }
   meters.delete(id);
   layout();
+  tuneNet();
+}
+
+// битрейт видео под число участников (модуль net-quality.js)
+function tuneNet() {
+  const pcs = [...S.peers.values()].map((p) => p.pc).filter(Boolean);
+  try { window.NetQuality?.tune?.(pcs, { screen: !!S.local.screen }); } catch (e) { console.warn('tune', e); }
 }
 
 const currentVideoTrack = () => S.local.screen || S.local.video || null;
@@ -406,8 +509,20 @@ function newPC(id) {
     layout();
   };
   pc.onconnectionstatechange = () => {
+    if (peer.pc !== pc) return;
+    const st = pc.connectionState;
+    const alive = () => S.peers.get(id) === peer && peer.pc === pc;
+    if (st !== 'disconnected') { clearTimeout(peer.iceTimer); peer.iceTimer = null; }
     // если соединение оборвалось — инициатор переподключается
-    if (pc.connectionState === 'failed' && peer.initiate && S.peers.get(id) === peer) setTimeout(() => callPeer(id), 1000);
+    if (st === 'failed' && peer.initiate && alive()) setTimeout(() => alive() && callPeer(id), 1000);
+    // «disconnected» дольше 8 секунд — тоже переподключаемся
+    if (st === 'disconnected' && peer.initiate && !peer.iceTimer) {
+      peer.iceTimer = setTimeout(() => {
+        peer.iceTimer = null;
+        if (alive() && pc.connectionState === 'disconnected') callPeer(id);
+      }, 8000);
+    }
+    if (st === 'connected') tuneNet();
     layout();
   };
   return pc;
@@ -463,7 +578,7 @@ const pushVideoTrack = () => replaceAll('video', currentVideoTrack());
 const pushAudioTrack = () => replaceAll('audio', S.local.audio);
 
 function sendMedia() {
-  if (!S.joined) return;
+  if (!S.joined || S.reconnecting) return;
   socket.emit('media', { cam: !!(S.local.video || S.local.screen), mic: !!S.local.audio, screen: !!S.local.screen });
   layout();
 }
@@ -532,10 +647,10 @@ $('#btnScreen').onclick = async () => {
     try {
       const st = await navigator.mediaDevices.getDisplayMedia({ video: true });
       S.local.screen = st.getVideoTracks()[0];
-      S.local.screen.onended = () => { S.local.screen = null; pushVideoTrack(); sendMedia(); updateButtons(); };
+      S.local.screen.onended = () => { S.local.screen = null; pushVideoTrack(); sendMedia(); updateButtons(); tuneNet(); };
     } catch (e) { return; }
   }
-  pushVideoTrack(); sendMedia(); updateButtons();
+  pushVideoTrack(); sendMedia(); updateButtons(); tuneNet();
 };
 
 $('#btnHand').onclick = () => { S.hand = !S.hand; socket.emit('hand', S.hand); updateButtons(); };
@@ -545,6 +660,7 @@ $('#btnLeave').onclick = async () => {
   if (REC.recorder && !confirm('Идёт запись. Остановить её, сохранить и выйти?')) return;
   if (REC.recorder) await stopHostRecording();
   socket.emit('leave');
+  saveRejoin(null);
   showEnd('Вы покинули встречу', REC.uploading ? 'Запись загружается — не закрывайте страницу, пока не появится «Запись сохранена».' : '');
 };
 
@@ -718,6 +834,7 @@ $('#chatForm').onsubmit = (e) => {
   e.preventDefault();
   const text = $('#chatInput').value.trim();
   if (!text) return;
+  if (S.reconnecting) return toast('Нет связи — сообщение не отправлено');
   socket.emit('chat', text);
   $('#chatInput').value = '';
 };
@@ -1003,11 +1120,15 @@ function syncVideo(force) {
   const want = expectedPos();
   const dur = p.duration || pbVideo.duration;
   if (isFinite(dur) && want >= dur) { pbVideo.pause(); return; }
-  if (force || Math.abs(pbVideo.currentTime - want) > 2) pbVideo.currentTime = want;
+  const d = window.PlaybackSync?.decide?.({ current: pbVideo.currentTime, want, readyState: pbVideo.readyState, paused: pbVideo.paused, force: !!force });
+  if (d) {
+    if (d.seek != null && isFinite(d.seek)) pbVideo.currentTime = d.seek;
+    if (isFinite(d.rate) && d.rate > 0 && pbVideo.playbackRate !== d.rate) pbVideo.playbackRate = d.rate;
+  } else if (force || Math.abs(pbVideo.currentTime - want) > 2) pbVideo.currentTime = want;
   if (p.status === 'playing' && pbVideo.paused) playPb();
   if (p.status === 'paused' && !pbVideo.paused) pbVideo.pause();
 }
-setInterval(() => syncVideo(false), 3000);
+setInterval(() => syncVideo(false), 1000);
 
 function playPb() {
   pbVideo.play().then(connectPresenterAudio).catch((err) => {

@@ -263,7 +263,7 @@ app.post('/api/recordings', requireAdmin, upload.single('file'), (req, res) => {
 // остальные (WebM, VP9, Opus из браузерной записи) перекодируются в фоне. Пока идёт обработка, используется исходник.
 function optimizeRecording(rec) {
   const src = path.join(db.UPLOAD_DIR, rec.file);
-  execFile('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,height:format=bit_rate', '-of', 'json', src], (perr, out) => {
+  execFile('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height:format=bit_rate', '-of', 'json', src], (perr, out) => {
     if (perr) return;
     let info;
     try { info = JSON.parse(out); } catch (e) { return; }
@@ -271,13 +271,13 @@ function optimizeRecording(rec) {
     const a = (info.streams || []).find((x) => x.codec_type === 'audio');
     const bitrate = Number(info.format?.bit_rate) || 0;
     // слишком тяжёлые файлы (например, видео с телефона 4K) тоже пережимаем — иначе у людей со слабым интернетом будет тормозить
-    const light = !v || ((v.height || 0) <= 1080 && (!bitrate || bitrate <= 4_000_000));
+    const light = !v || (Math.min(v.width || 0, v.height || 0) <= 1080 && (!bitrate || bitrate <= 4_000_000));
     const compatible = (!v || v.codec_name === 'h264') && (!a || a.codec_name === 'aac' || a.codec_name === 'mp3') && light;
     const outName = crypto.randomBytes(16).toString('hex') + '.mp4';
     const dst = path.join(db.UPLOAD_DIR, outName);
     const args = ['-y', '-v', 'error', '-i', src];
     if (compatible) args.push('-c', 'copy');
-    else args.push('-vf', "scale='min(1280,iw)':-2", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+    else args.push('-vf', "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
       '-maxrate', '1800k', '-bufsize', '3600k', '-g', '48', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
     args.push('-movflags', '+faststart', dst);
     // перекодирование — с низким приоритетом, чтобы не мешать встречам
@@ -288,9 +288,9 @@ function optimizeRecording(rec) {
         const d = parseFloat(dout);
         let size = 0;
         try { size = fs.statSync(dst).size; } catch (e) {}
-        if (compatible) {
+        if (compatible || v?.codec_name === 'h264') {
           db.updateRecording(rec.id, { file: outName, mime: 'video/mp4', duration: !e2 && d > 0 ? d : undefined, size });
-          // старый файл удаляем позже: его ещё могут досматривать участники идущей встречи
+          // исходник удаляем позже (запасным он не нужен — H.264 играет везде): его ещё могут досматривать участники идущей встречи
           setTimeout(() => fs.rm(src, () => {}), 6 * 3600_000).unref();
         } else {
           // исходник оставляем запасным вариантом для браузеров без H.264
@@ -325,11 +325,22 @@ app.delete('/api/recordings/:id/share', requireAdmin, (req, res) => {
 app.get('/api/watch/:token', (req, res) => {
   const rec = db.findRecordingByShare(String(req.params.token));
   if (!rec) return res.status(404).json({ error: 'Запись не найдена или доступ к ней закрыт' });
-  db.updateRecording(rec.id, { views: (rec.views || 0) + 1 });
+  db.bumpViews(rec.id);
+  const t = encodeURIComponent(rec.shareToken);
   res.json({
     title: rec.title, author: db.adminName(rec.ownerId), createdAt: rec.createdAt, duration: rec.duration,
-    url: `/media/${rec.file}`, altUrl: rec.altFile ? `/media/${rec.altFile}` : null,
+    // видео идёт через ссылку с проверкой доступа: после «Закрыть доступ» оно перестаёт открываться
+    url: `/v/${t}/video${path.extname(rec.file)}`,
+    altUrl: rec.altFile ? `/v/${t}/alt${path.extname(rec.altFile)}` : null,
   });
+});
+
+app.get('/v/:token/:kind(video|alt).:ext', (req, res) => {
+  const rec = db.findRecordingByShare(String(req.params.token));
+  const file = rec && (req.params.kind === 'alt' ? rec.altFile : rec.file);
+  if (!file) return res.sendStatus(404);
+  res.set('Cache-Control', 'private, no-store');
+  res.sendFile(path.join(db.UPLOAD_DIR, file));
 });
 
 app.delete('/api/recordings/:id', requireAdmin, (req, res) => {
@@ -350,8 +361,11 @@ const PACK = fs.existsSync(PACK_DIR)
   : [];
 const EMOJI_RE = /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator})[\p{Extended_Pictographic}\p{Emoji_Component}‍️⃣]*$/u;
 
+// значения от клиента: берём только настоящие строки (объект с подменённым toString уронил бы сервер)
+const str = (v) => (typeof v === 'string' ? v : '');
+
 function validReaction(room, code) {
-  code = String(code || '');
+  code = str(code);
   if (code.startsWith('pack:')) return PACK.includes(code.slice(5));
   if (code.startsWith('custom:')) return db.getEmoji(code.slice(7))?.ownerId === room.ownerId;
   return code.length <= 16 && EMOJI_RE.test(code);
@@ -816,20 +830,31 @@ io.on('connection', (socket) => {
     return p ? { room, p, live: lives.get(roomId) } : null;
   };
 
-  socket.on('join', ({ roomId, name, asHost, hidden, rejoin } = {}, cb = () => {}) => {
-    const room = db.getRoom(roomId);
+  socket.on('join', (args, cb) => {
+    if (typeof cb !== 'function') cb = () => {};
+    const { roomId: rawRoom, name: rawName, asHost, hidden, rejoin } = args && typeof args === 'object' ? args : {};
+    const room = db.getRoom(str(rawRoom));
     if (!room) return cb({ error: 'Встреча не найдена' });
     if (socket.data.roomId) return cb({ error: 'Вы уже в комнате' });
     // возвращение после обрыва связи — без зала ожидания
-    const back = rejoin && lives.get(roomId)?.rejoin?.get(String(rejoin));
+    const back = lives.get(room.id)?.rejoin?.get(str(rejoin));
     if (back && back.expires > Date.now()) {
-      lives.get(roomId).rejoin.delete(String(rejoin));
-      const { name: n, role, hidden: h, camOverride, micOverride } = back.p;
+      const live = lives.get(room.id);
+      const { id: oldId, name: n, role, hidden: h, camOverride, micOverride } = back.p;
+      // права ведущего проверяем ДО того, как трогать чужое подключение
       if (role === 'host' && socket.data.user?.id !== room.ownerId) return cb({ error: 'Нет прав ведущего в этой встрече' });
-      admit(socket, roomId, { name: n, role, hidden: h, camOverride, micOverride });
+      live.rejoin.delete(str(rejoin));
+      // сервер мог ещё не заметить обрыв старого подключения — убираем его, чтобы не было «двойника»
+      if (live.participants.get(oldId) === back.p) {
+        const old = io.sockets.sockets.get(oldId);
+        if (old) { old.data.roomId = null; old.leave(roomId); old.disconnect(true); }
+        removeParticipant(room.id, oldId);
+      }
+      admit(socket, room.id, { name: n, role, hidden: h, camOverride, micOverride });
       return cb({ status: 'joined' });
     }
-    name = String(name || '').trim().slice(0, 40);
+    const roomId = room.id;
+    const name = str(rawName).trim().slice(0, 40);
     if (!name) return cb({ error: 'Введите имя' });
     if (asHost) {
       if (socket.data.user?.id !== room.ownerId) return cb({ error: 'Нет прав ведущего в этой встрече' });
@@ -849,13 +874,15 @@ io.on('connection', (socket) => {
     cb({ status: 'joined' });
   });
 
-  socket.on('signal', ({ to, data } = {}) => {
+  socket.on('signal', (args) => {
+    const { to, data } = args && typeof args === 'object' ? args : {};
     const c = current();
     if (!c || !c.live.participants.has(to)) return;
     io.to(to).emit('signal', { from: socket.id, data });
   });
 
-  socket.on('media', ({ cam, mic, screen } = {}) => {
+  socket.on('media', (args) => {
+    const { cam, mic, screen } = args && typeof args === 'object' ? args : {};
     const c = current();
     if (!c) return;
     const perms = effectivePerms(c.room, c.p);
@@ -878,7 +905,7 @@ io.on('connection', (socket) => {
     const c = current();
     if (!c) return;
     if (!c.room.settings.allowChat && c.p.role !== 'host') return;
-    text = String(text || '').trim().slice(0, 1000);
+    text = str(text).trim().slice(0, 1000);
     if (!text) return;
     pushChat(c.room, { id: crypto.randomBytes(6).toString('hex'), name: c.p.name, text, at: Date.now(), host: c.p.role === 'host' });
   });
@@ -891,7 +918,7 @@ io.on('connection', (socket) => {
     if (now - (socket.data.lastReaction || 0) < 400) return; // защита от спама
     socket.data.lastReaction = now;
     if (!validReaction(c.room, emoji)) return;
-    io.to(c.room.id).emit('reaction', { from: socket.id, emoji: String(emoji) });
+    io.to(c.room.id).emit('reaction', { from: socket.id, emoji: str(emoji) });
   });
 
   socket.on('leave', () => {
@@ -907,8 +934,9 @@ io.on('connection', (socket) => {
   });
 
   // ----- Управление (только владелец встречи) -----
-  const adminOn = (event, handler) => socket.on(event, (args = {}, cb) => {
+  const adminOn = (event, handler) => socket.on(event, (args, cb) => {
     const reply = typeof cb === 'function' ? cb : () => {};
+    if (!args || typeof args !== 'object') args = {};
     const room = db.getRoom(args.roomId);
     if (!room) return reply({ error: 'Комната не найдена' });
     if (!socket.data.user || socket.data.user.id !== room.ownerId) return reply({ error: 'Нет доступа' });
@@ -1008,6 +1036,9 @@ io.on('connection', (socket) => {
 
   adminOn('admin:end', (room) => endMeeting(room.id, 'Встреча завершена организатором'));
 });
+
+process.on('uncaughtException', (err) => console.error('Необработанная ошибка:', err));
+process.on('unhandledRejection', (err) => console.error('Необработанная ошибка:', err));
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
