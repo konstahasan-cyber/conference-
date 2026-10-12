@@ -263,17 +263,22 @@ app.post('/api/recordings', requireAdmin, upload.single('file'), (req, res) => {
 // остальные (WebM, VP9, Opus из браузерной записи) перекодируются в фоне. Пока идёт обработка, используется исходник.
 function optimizeRecording(rec) {
   const src = path.join(db.UPLOAD_DIR, rec.file);
-  execFile('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name', '-of', 'csv=p=0', src], (perr, out) => {
+  execFile('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,height:format=bit_rate', '-of', 'json', src], (perr, out) => {
     if (perr) return;
-    const streams = String(out).trim().split('\n').map((l) => l.split(','));
-    const vcodec = streams.find((x) => x[1] === 'video')?.[0];
-    const acodec = streams.find((x) => x[1] === 'audio')?.[0];
-    const compatible = (!vcodec || vcodec === 'h264') && (!acodec || acodec === 'aac' || acodec === 'mp3');
+    let info;
+    try { info = JSON.parse(out); } catch (e) { return; }
+    const v = (info.streams || []).find((x) => x.codec_type === 'video');
+    const a = (info.streams || []).find((x) => x.codec_type === 'audio');
+    const bitrate = Number(info.format?.bit_rate) || 0;
+    // слишком тяжёлые файлы (например, видео с телефона 4K) тоже пережимаем — иначе у людей со слабым интернетом будет тормозить
+    const light = !v || ((v.height || 0) <= 1080 && (!bitrate || bitrate <= 4_000_000));
+    const compatible = (!v || v.codec_name === 'h264') && (!a || a.codec_name === 'aac' || a.codec_name === 'mp3') && light;
     const outName = crypto.randomBytes(16).toString('hex') + '.mp4';
     const dst = path.join(db.UPLOAD_DIR, outName);
     const args = ['-y', '-v', 'error', '-i', src];
     if (compatible) args.push('-c', 'copy');
-    else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
+    else args.push('-vf', "scale='min(1280,iw)':-2", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+      '-maxrate', '1800k', '-bufsize', '3600k', '-g', '48', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
     args.push('-movflags', '+faststart', dst);
     // перекодирование — с низким приоритетом, чтобы не мешать встречам
     const [cmd, cmdArgs] = compatible ? ['ffmpeg', args] : ['nice', ['-n', '15', 'ffmpeg', ...args]];
@@ -300,6 +305,30 @@ app.patch('/api/recordings/:id', requireAdmin, (req, res) => {
   if (!ownRecording(req.user, req.params.id)) return res.status(404).json({ error: 'Не найдено' });
   const { title, duration } = req.body || {};
   res.json(db.updateRecording(req.params.id, { title, duration }));
+});
+
+// Публичная ссылка на просмотр записи (как на YouTube: без регистрации)
+app.post('/api/recordings/:id/share', requireAdmin, (req, res) => {
+  const rec = ownRecording(req.user, req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Не найдено' });
+  const token = rec.shareToken || crypto.randomBytes(9).toString('base64url');
+  db.updateRecording(rec.id, { shareToken: token });
+  res.json({ token, url: `/v/${token}` });
+});
+app.delete('/api/recordings/:id/share', requireAdmin, (req, res) => {
+  const rec = ownRecording(req.user, req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Не найдено' });
+  db.updateRecording(rec.id, { shareToken: null });
+  res.json({ ok: true });
+});
+app.get('/api/watch/:token', (req, res) => {
+  const rec = db.findRecordingByShare(String(req.params.token));
+  if (!rec) return res.status(404).json({ error: 'Запись не найдена или доступ к ней закрыт' });
+  db.updateRecording(rec.id, { views: (rec.views || 0) + 1 });
+  res.json({
+    title: rec.title, author: db.adminName(rec.ownerId), createdAt: rec.createdAt, duration: rec.duration,
+    url: `/media/${rec.file}`, altUrl: rec.altFile ? `/media/${rec.altFile}` : null,
+  });
 });
 
 app.delete('/api/recordings/:id', requireAdmin, (req, res) => {
@@ -396,6 +425,7 @@ const pub = path.join(__dirname, 'public');
 app.use(express.static(pub, { index: false }));
 app.get('/', (req, res) => res.sendFile(path.join(pub, 'index.html')));
 app.get('/r/:id', (req, res) => res.sendFile(path.join(pub, 'room.html')));
+app.get('/v/:token', (req, res) => res.sendFile(path.join(pub, 'watch.html')));
 app.get('/admin', (req, res) => res.sendFile(path.join(pub, 'admin', userFromCookie(req.headers.cookie) ? 'index.html' : 'login.html')));
 app.get('/admin/room/:id', (req, res) => {
   if (!userFromCookie(req.headers.cookie)) return res.redirect('/admin');
@@ -629,6 +659,7 @@ function endMeeting(roomId, reason) {
     io.to(roomId).emit('peer-left', { id });
   }
   live.chat = [];
+  for (const [t, r] of live.rejoin || []) if (r.p.role !== 'host') live.rejoin.delete(t);
   notifyAdmins(roomId);
 }
 
@@ -700,15 +731,22 @@ function maybeFirstGuestStart(roomId) {
 }
 
 // ---------- Сокеты ----------
-function admit(socket, roomId, { name, role, hidden }) {
+// Токен переподключения: если у участника на минуту пропал интернет, он возвращается
+// во встречу сам, без зала ожидания и с теми же правами.
+const REJOIN_TTL = 3 * 60_000;
+
+function admit(socket, roomId, { name, role, hidden, camOverride = null, micOverride = null }) {
   const room = db.getRoom(roomId);
   const live = getLive(roomId);
   live.waiting.delete(socket.id);
   const p = {
     id: socket.id, name, role, hidden: !!hidden,
     cam: false, mic: false, screen: false, hand: false,
-    camOverride: null, micOverride: null,
+    camOverride, micOverride,
+    rejoin: crypto.randomBytes(16).toString('hex'),
   };
+  live.rejoin ??= new Map();
+  live.rejoin.set(p.rejoin, { p, expires: Infinity });
   live.participants.set(socket.id, p);
   socket.join(roomId);
   socket.data.roomId = roomId;
@@ -718,6 +756,7 @@ function admit(socket, roomId, { name, role, hidden }) {
     room: guestRoomInfo(room),
     playback: playbackPayload(roomId),
     chat: live.chat.slice(-100),
+    rejoin: p.rejoin,
   });
   socket.to(roomId).emit('peer-joined', publicParticipant(room, p));
   if (role === 'guest') maybeFirstGuestStart(roomId);
@@ -739,13 +778,24 @@ function denyWaiting(roomId, id) {
   if (s) { s.emit('denied'); s.data.roomId = null; }
 }
 
-function removeParticipant(roomId, id) {
+function removeParticipant(roomId, id, { keepRejoin = false } = {}) {
   const live = lives.get(roomId);
   if (!live) return;
   live.waiting.delete(id);
-  if (live.participants.delete(id)) io.to(roomId).emit('peer-left', { id });
+  const p = live.participants.get(id);
+  if (p) {
+    live.participants.delete(id);
+    if (keepRejoin && live.rejoin?.has(p.rejoin)) live.rejoin.get(p.rejoin).expires = Date.now() + REJOIN_TTL;
+    else live.rejoin?.delete(p.rejoin);
+    io.to(roomId).emit('peer-left', { id });
+  }
   notifyAdmins(roomId);
 }
+
+setInterval(() => {
+  const now = Date.now();
+  for (const live of lives.values()) for (const [t, r] of live.rejoin || []) if (r.expires < now) live.rejoin.delete(t);
+}, 60_000).unref();
 
 function pushChat(room, msg) {
   const live = getLive(room.id);
@@ -765,10 +815,19 @@ io.on('connection', (socket) => {
     return p ? { room, p, live: lives.get(roomId) } : null;
   };
 
-  socket.on('join', ({ roomId, name, asHost, hidden } = {}, cb = () => {}) => {
+  socket.on('join', ({ roomId, name, asHost, hidden, rejoin } = {}, cb = () => {}) => {
     const room = db.getRoom(roomId);
     if (!room) return cb({ error: 'Встреча не найдена' });
     if (socket.data.roomId) return cb({ error: 'Вы уже в комнате' });
+    // возвращение после обрыва связи — без зала ожидания
+    const back = rejoin && lives.get(roomId)?.rejoin?.get(String(rejoin));
+    if (back && back.expires > Date.now()) {
+      lives.get(roomId).rejoin.delete(String(rejoin));
+      const { name: n, role, hidden: h, camOverride, micOverride } = back.p;
+      if (role === 'host' && socket.data.user?.id !== room.ownerId) return cb({ error: 'Нет прав ведущего в этой встрече' });
+      admit(socket, roomId, { name: n, role, hidden: h, camOverride, micOverride });
+      return cb({ status: 'joined' });
+    }
     name = String(name || '').trim().slice(0, 40);
     if (!name) return cb({ error: 'Введите имя' });
     if (asHost) {
@@ -843,7 +902,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    if (socket.data.roomId) removeParticipant(socket.data.roomId, socket.id);
+    if (socket.data.roomId) removeParticipant(socket.data.roomId, socket.id, { keepRejoin: true });
   });
 
   // ----- Управление (только владелец встречи) -----
