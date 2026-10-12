@@ -9,7 +9,9 @@ let seeking = false;
 
 const inviteUrl = `${location.origin}/r/${roomId}`;
 $('#inviteLink').value = inviteUrl;
+$('#roomCode').textContent = roomId;
 $('#enterBtn').href = `/r/${roomId}`;
+$('#observeBtn').href = `/r/${roomId}?observer=1`;
 $('#copyLink').onclick = async () => { await navigator.clipboard.writeText(inviteUrl).catch(() => {}); toast('Ссылка скопирована'); };
 
 socket.on('connect', () => emit('admin:watch'));
@@ -18,67 +20,39 @@ socket.on('admin:state', (st) => {
   state = st;
   render();
 });
+socket.on('emojis-updated', () => loadEmojis());
+loadEmojis();
 
 $('#endBtn').onclick = () => { if (confirm('Завершить встречу для всех участников?')) emit('admin:end'); };
+$('#dupBtn').onclick = async () => {
+  const room = await api(`/api/rooms/${roomId}/duplicate`, { method: 'POST' });
+  toast('Копия создана — открываю её пульт');
+  setTimeout(() => (location.href = `/admin/room/${room.id}`), 700);
+};
 
 $('#saveName').onclick = async () => {
   await api(`/api/rooms/${roomId}`, { method: 'PUT', body: { name: $('#roomName').value } });
   toast('Сохранено');
 };
 
-$$('[data-set]').forEach((el) => {
-  el.onchange = () => emit('admin:settings', { settings: { [el.dataset.set]: el.checked } });
-});
-
-const toLocalInput = (iso) => {
-  if (!iso) return '';
-  const d = new Date(iso);
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-};
-
 async function fillPlaybackForm() {
-  const recs = await api('/api/recordings');
-  const pb = state.room.playback;
-  $('#pbRec').innerHTML = '<option value="">— не выбрана —</option>' +
-    recs.map((r) => `<option value="${r.id}">${esc(r.title)}${r.duration ? ' (' + fmtTime(r.duration) + ')' : ''}</option>`).join('');
-  $('#pbRec').value = pb.recordingId || '';
-  $$('input[name=pbDisplay]').forEach((r) => (r.checked = r.value === pb.display));
-  $$('input[name=pbMode]').forEach((r) => (r.checked = r.value === pb.startMode));
-  $('#pbName').value = pb.presenterName;
-  $('#pbShowBefore').checked = pb.showPresenterBeforeStart;
-  $('#pbAt').value = toLocalInput(pb.startAt);
-  $('#pbDelay').value = pb.delaySec;
-  $('#pbEnd').value = pb.endAction;
   formFilled = true;
+  const recs = await api('/api/recordings');
+  renderPlaybackForm($('#pbForm'), state.room.playback, recs);
 }
 
-$('#pbAt').onfocus = () => ($('input[name=pbMode][value=scheduled]').checked = true);
-$('#pbDelay').onfocus = () => ($('input[name=pbMode][value=firstGuest]').checked = true);
-
 $('#pbSave').onclick = async () => {
-  const mode = $('input[name=pbMode]:checked')?.value || 'manual';
-  if (mode === 'scheduled' && !$('#pbAt').value) return toast('Укажите дату и время старта');
-  if (mode !== 'manual' && !$('#pbRec').value) return toast('Выберите запись');
-  await api(`/api/rooms/${roomId}`, {
-    method: 'PUT',
-    body: {
-      playback: {
-        recordingId: $('#pbRec').value || null,
-        display: $('input[name=pbDisplay]:checked')?.value,
-        presenterName: $('#pbName').value,
-        showPresenterBeforeStart: $('#pbShowBefore').checked,
-        startMode: mode,
-        startAt: $('#pbAt').value ? new Date($('#pbAt').value).toISOString() : null,
-        delaySec: $('#pbDelay').value,
-        endAction: $('#pbEnd').value,
-      },
-    },
-  });
-  toast('Настройки показа сохранены');
+  const playback = readPlaybackForm($('#pbForm'));
+  const err = validatePlayback(playback);
+  if (err) return toast(err);
+  try {
+    await api(`/api/rooms/${roomId}`, { method: 'PUT', body: { playback } });
+    toast('Настройки показа сохранены');
+  } catch (e) { toast(e.message); }
 };
 
 $('#pbStart').onclick = () => {
-  const recordingId = $('#pbRec').value || state.room.playback.recordingId;
+  const recordingId = $('[data-f=recordingId]')?.value || state.room.playback.recordingId;
   if (!recordingId) return toast('Выберите запись');
   if (state.playback.status === 'playing' && !confirm('Запись уже идёт. Запустить заново с начала?')) return;
   emit('admin:playback', { action: 'start', recordingId });
@@ -88,6 +62,7 @@ $('#pbResume').onclick = () => emit('admin:playback', { action: 'resume' });
 $('#pbStop').onclick = () => { if (confirm('Остановить показ записи у всех?')) emit('admin:playback', { action: 'stop' }); };
 $('#pbSeek').oninput = () => { seeking = true; $('#pbPos').textContent = fmtTime($('#pbSeek').value); };
 $('#pbSeek').onchange = () => { seeking = false; emit('admin:playback', { action: 'seek', position: Number($('#pbSeek').value) }); };
+$('#pbReact').onclick = () => emojiPicker($('#pbReact'), (code) => emit('admin:reaction', { emoji: code }), { quick: true });
 
 function pbPosition() {
   const p = state.playback;
@@ -97,16 +72,25 @@ function pbPosition() {
 function render() {
   const { room, playback } = state;
   $('#roomTitle').textContent = room.name;
-  document.title = 'Управление: ' + room.name;
+  document.title = 'Пульт: ' + room.name;
   if (document.activeElement !== $('#roomName')) $('#roomName').value = room.name;
+  if (!$('#switches').children.length) {
+    $('#switches').innerHTML = switchesHtml(room.settings);
+    $$('[data-set]').forEach((el) => (el.onchange = () => emit('admin:settings', { settings: { [el.dataset.set]: el.checked } })));
+  }
   $$('[data-set]').forEach((el) => (el.checked = !!room.settings[el.dataset.set]));
   renderControls($('#controls'), state, socket);
   if (!formFilled) fillPlaybackForm();
   if (!$('#chatAs').value) $('#chatAs').value = room.playback.presenterName || 'Организатор';
+  $('#schedInfo').innerHTML = `${ic('clock', 'sm')} ${scheduleText(room.playback, room.nextStart)}`;
+
+  const n = state.participants.filter((p) => !p.hidden).length;
+  $('#liveBadge').className = n ? 'badge ok' : 'badge';
+  $('#liveBadge').innerHTML = `${ic('users', 'sm')} ${n} в комнате${state.waiting.length ? ` · ${state.waiting.length} ждут` : ''}`;
 
   pbRecv = performance.now();
-  const labels = { idle: 'не запущена', playing: '<span class="badge live">идёт</span>', paused: '<span class="badge warn">на паузе</span>', ended: '<span class="badge">закончилась</span>' };
-  $('#pbStatus').innerHTML = (labels[playback.status] || '') + (playback.title ? ` — ${esc(playback.title)}` : '');
+  const labels = { idle: '<span class="badge">не запущена</span>', playing: '<span class="badge live">в эфире</span>', paused: '<span class="badge warn">на паузе</span>', ended: '<span class="badge">закончилась</span>' };
+  $('#pbStatus').innerHTML = (labels[playback.status] || '') + (playback.title ? ` <span class="muted">${esc(playback.title)}</span>` : '');
   $('#pbPause').disabled = playback.status !== 'playing';
   $('#pbResume').disabled = playback.status !== 'paused';
   $('#pbStop').disabled = playback.status === 'idle';
@@ -119,8 +103,10 @@ function render() {
   } else if (pv.src) { pv.removeAttribute('src'); pv.load(); }
   syncPreview(true);
 
-  $('#chatList').innerHTML = state.chat.map((m) => `<div class="chat-msg"><div class="who"><b>${esc(m.name)}</b> · ${new Date(m.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div><div class="txt">${chatHtml(m.text)}</div></div>`).join('') || '<div class="muted small">Сообщений пока нет</div>';
-  $('#chatList').scrollTop = $('#chatList').scrollHeight;
+  const list = $('#chatList');
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  list.innerHTML = state.chat.map((m) => `<div class="chat-msg">${avatarHtml(m.name)}<div class="grow"><div class="who"><b>${esc(m.name)}</b>${new Date(m.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div><div class="txt ${isJumbo(m.text) ? 'jumbo' : ''}">${chatHtml(m.text)}</div></div></div>`).join('') || '<div class="muted small">Сообщений пока нет</div>';
+  if (atBottom) list.scrollTop = list.scrollHeight;
 }
 
 function syncPreview(force) {
@@ -140,17 +126,7 @@ function syncPreview(force) {
 $('#pbPreview').onloadedmetadata = () => syncPreview(true);
 setInterval(() => syncPreview(false), 1000);
 
-loadEmojis();
-socket.on('emojis-updated', () => loadEmojis());
-$('#pbReact').onclick = (e) => {
-  e.stopPropagation();
-  emojiPicker($('#pbReact'), (code) => emit('admin:reaction', { emoji: code }));
-};
-$('#chatEmoji').onclick = (e) => {
-  e.stopPropagation();
-  emojiPicker($('#chatEmoji'), (code, name) => { $('#chatText').value += name ? `:${name}:` : code; $('#chatText').focus(); });
-};
-
+$('#chatEmoji').onclick = () => emojiPicker($('#chatEmoji'), (code, text) => { $('#chatText').value += text; $('#chatText').focus(); });
 $('#chatForm').onsubmit = (e) => {
   e.preventDefault();
   const text = $('#chatText').value.trim();

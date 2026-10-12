@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><defs>
+<radialGradient id="f" cx="40%" cy="32%" r="75%"><stop offset="0" stop-color="#FFF27A"/><stop offset=".55" stop-color="#FFD02B"/><stop offset="1" stop-color="#F59E0B"/></radialGradient>
+<radialGradient id="cheek" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#FF6B6B" stop-opacity=".55"/><stop offset="1" stop-color="#FF6B6B" stop-opacity="0"/></radialGradient>
+<linearGradient id="gl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".75"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+</defs><circle cx="64" cy="66" r="54" fill="url(#f)"/><ellipse cx="54" cy="30" rx="30" ry="14" fill="url(#gl)"/>
+<path d="M34 52q9-10 18 0" stroke="#5B3410" stroke-width="6" fill="none" stroke-linecap="round"/>
+<path d="M76 52q9-10 18 0" stroke="#5B3410" stroke-width="6" fill="none" stroke-linecap="round"/>
+<path d="M30 70q34 4 68 0q-4 34-34 34T30 70z" fill="#5B3410"/>
+<path d="M40 74q24 3 48 0v6q-24 3-48 0z" fill="#fff"/>
+<path d="M50 96q14-10 28 0q-14 8-28 0z" fill="#F0546C"/>
+<path d="M22 56q-14 6-12 22q8 0 14-12z" fill="#5BC0FF"/><path d="M106 56q14 6 12 22q-8 0-14-12z" fill="#5BC0FF"/>
+</svg>

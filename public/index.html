@@ -4,22 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Видеовстречи</title>
+  <link rel="icon" href="/icons/video.svg">
   <link rel="stylesheet" href="/css/style.css">
 </head>
-<body>
+<body class="glow">
 <div class="center-page">
-  <form class="card stack" style="max-width:420px;width:100%" id="f">
-    <h1>Подключиться к встрече</h1>
-    <div class="muted">Введите код встречи или вставьте ссылку-приглашение.</div>
-    <input id="code" placeholder="abc-defg-hij" autofocus>
-    <button class="btn primary" style="width:100%">Подключиться</button>
-    <div class="muted small" style="text-align:center"><a href="/admin">Вход для организатора</a></div>
+  <form class="card glass stack" style="max-width:440px;width:100%;padding:30px" id="f">
+    <div class="logo"><span class="mark"><i data-ic="video"></i></span>Встречи</div>
+    <div><h1 style="margin:0">Подключиться к встрече</h1><div class="muted">Введите код встречи или вставьте ссылку-приглашение</div></div>
+    <input id="code" placeholder="abc-defg-hij" autofocus class="mono" style="font-size:16px;padding:13px 14px">
+    <button class="btn primary lg block"><i data-ic="log-in"></i>Подключиться</button>
+    <div class="small" style="text-align:center"><a href="/admin">Вход для организатора</a></div>
   </form>
 </div>
+<script src="/js/common.js"></script>
 <script>
-document.getElementById('f').onsubmit = (e) => {
+$('#f').onsubmit = (e) => {
   e.preventDefault();
-  let v = document.getElementById('code').value.trim();
+  let v = $('#code').value.trim();
   if (!v) return;
   const m = v.match(/\/r\/([^/?#]+)/);
   if (m) v = m[1];

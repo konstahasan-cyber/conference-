@@ -1,5 +1,6 @@
-// Клиент комнаты: зал ожидания, WebRTC (mesh), чат, синхронный показ записи.
+// Клиент комнаты: зал ожидания, WebRTC (mesh), чат, реакции, синхронный показ записи, управление у ведущего.
 const roomId = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop());
+const params = new URLSearchParams(location.search);
 const PRESENTER = '__presenter';
 const SELF = '__self';
 
@@ -7,81 +8,122 @@ const S = {
   self: null,
   role: 'guest',
   joined: false,
-  peers: new Map(),          // id -> { info, pc, stream, chain, pending }
-  tiles: new Map(),          // key -> { el, video, avatar, nameEl, micEl, handEl }
+  peers: new Map(),          // id -> { info, pc, stream, chain, pending, initiate }
+  tiles: new Map(),          // key -> { el, video, avatar, nameEl, micEl, handEl, netEl }
   room: null,
   perms: { allowCam: false, allowMic: false },
   local: { audio: null, video: null, screen: null },
+  dev: { mic: localStorage.getItem('devMic') || '', cam: localStorage.getItem('devCam') || '', spk: localStorage.getItem('devSpk') || '' },
   iceServers: [],
   hand: false,
   playback: null,
   adminState: null,
+  recordings: [],
   side: null,
   unread: 0,
   joinedAt: 0,
-  isAdmin: false,
+  isOwner: false,
+  observer: false,
 };
 let audioCtx = null;
+const blockedMedia = new Set();
 
 const socket = io({ autoConnect: true });
+
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+  if (audioCtx?.state === 'suspended') audioCtx.resume().catch(() => {});
+  return audioCtx;
+}
 
 // ---------- Перед входом ----------
 (async function init() {
   $('#nameInput').value = localStorage.getItem('confName') || '';
   try {
-    const [info, me, cfg] = await Promise.all([
+    const [info, cfg] = await Promise.all([
       api(`/api/rooms/${encodeURIComponent(roomId)}/public`),
-      api('/api/me'),
       api('/api/config'),
+      loadEmojis(roomId),
     ]);
     S.iceServers = cfg.iceServers;
-    loadEmojis();
-    S.isAdmin = me.admin;
+    S.isOwner = info.isOwner;
+    S.observer = info.isOwner && params.get('observer') === '1';
     S.perms = { allowCam: info.allowCamera, allowMic: info.allowMic };
     $('#preTitle').textContent = info.name;
     $('#preCode').textContent = `Код встречи: ${info.id}`;
     document.title = info.name;
-    if (me.admin) { $('#hostOptions').classList.remove('hidden'); updatePrejoinButtons(); }
+    if (S.isOwner) {
+      $('#hostNote').classList.remove('hidden');
+      $('#hostNoteText').textContent = S.observer ? 'Вы войдёте невидимо — участники вас не увидят' : 'Вы войдёте как ведущий';
+      if (S.observer) $('#hostNote').querySelector('[data-ic]')?.style.setProperty('--ic', 'url(/icons/eye-off.svg)');
+    }
   } catch (e) {
     $('#preTitle').textContent = 'Встреча не найдена';
     $('#preError').textContent = 'Проверьте ссылку-приглашение.';
     $('#joinBtn').disabled = true;
   }
-  updatePrejoinButtons();
+  updatePrejoin();
 })();
 
-function prejoinAllowed(kind) {
-  if (S.isAdmin && $('#asHost').checked) return !$('#asHidden').checked;
-  return kind === 'cam' ? S.perms.allowCam : S.perms.allowMic;
+const canUse = (kind) => (S.isOwner ? !S.observer : kind === 'cam' ? S.perms.allowCam : S.perms.allowMic);
+
+function setRound(btn, on, icOn, icOff, allowed) {
+  btn.classList.toggle('off', !on);
+  btn.disabled = !allowed;
+  btn.querySelector('.i').style.setProperty('--ic', `url(/icons/${on ? icOn : icOff}.svg)`);
 }
 
-function updatePrejoinButtons() {
-  const cam = $('#preCam'), mic = $('#preMic');
-  if (!prejoinAllowed('cam') && S.local.video) stopLocal('video');
-  if (!prejoinAllowed('mic') && S.local.audio) stopLocal('audio');
-  cam.disabled = !prejoinAllowed('cam');
-  mic.disabled = !prejoinAllowed('mic');
-  cam.textContent = !prejoinAllowed('cam') ? '📷 Камера недоступна' : S.local.video ? '📷 Камера вкл.' : '📷 Камера выкл.';
-  mic.textContent = !prejoinAllowed('mic') ? '🎤 Микрофон недоступен' : S.local.audio ? '🎤 Микрофон вкл.' : '🎤 Микрофон выкл.';
-  cam.classList.toggle('primary', !!S.local.video);
-  mic.classList.toggle('primary', !!S.local.audio);
+function updatePrejoin() {
+  if (!canUse('cam') && S.local.video) stopLocal('video');
+  if (!canUse('mic') && S.local.audio) stopLocal('audio');
+  setRound($('#preCam'), !!S.local.video, 'video', 'video-off', canUse('cam'));
+  setRound($('#preMic'), !!S.local.audio, 'mic', 'mic-off', canUse('mic'));
+  $('#preCam').title = canUse('cam') ? 'Камера' : 'Камера недоступна в этой встрече';
+  $('#preMic').title = canUse('mic') ? 'Микрофон' : 'Микрофон недоступен в этой встрече';
   const pv = $('#previewVideo');
-  pv.srcObject = S.local.video ? new MediaStream([S.local.video]) : null;
+  const want = S.local.video || null;
+  if ((pv.srcObject?.getVideoTracks()[0] || null) !== want) pv.srcObject = want ? new MediaStream([want]) : null;
   $('#previewOff').classList.toggle('hidden', !!S.local.video);
+  $('#preLevelHint').textContent = S.local.audio ? 'скажите что-нибудь' : canUse('mic') ? 'микрофон выключен' : 'микрофон недоступен';
 }
-$('#asHost').onchange = $('#asHidden').onchange = updatePrejoinButtons;
-$('#preCam').onclick = async () => { S.local.video ? stopLocal('video') : await startLocal('video'); updatePrejoinButtons(); };
-$('#preMic').onclick = async () => { S.local.audio ? stopLocal('audio') : await startLocal('audio'); updatePrejoinButtons(); };
+$('#preCam').onclick = async () => { S.local.video ? stopLocal('video') : await startLocal('video'); updatePrejoin(); };
+$('#preMic').onclick = async () => { ensureAudioCtx(); S.local.audio ? stopLocal('audio') : await startLocal('audio'); updatePrejoin(); };
+$('#preSettings').onclick = () => openDevices();
+
+function mediaError(kind, e) {
+  const what = kind === 'video' ? 'камере' : 'микрофону';
+  const map = {
+    NotAllowedError: `Нет доступа к ${what}. Нажмите на значок замка слева от адреса сайта и разрешите доступ.`,
+    NotFoundError: kind === 'video' ? 'Камера не найдена' : 'Микрофон не найден',
+    NotReadableError: `${kind === 'video' ? 'Камера' : 'Микрофон'} занят другой программой (Zoom, Telegram и т.п.) — закройте её`,
+    OverconstrainedError: 'Выбранное устройство недоступно',
+    SecurityError: 'Нужен защищённый адрес https://',
+  };
+  if (!window.isSecureContext) return 'Камера и микрофон работают только по адресу https://';
+  return map[e?.name] || `Не удалось включить ${kind === 'video' ? 'камеру' : 'микрофон'}`;
+}
 
 async function startLocal(kind) {
+  const id = kind === 'video' ? S.dev.cam : S.dev.mic;
+  const base = kind === 'video'
+    ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+    : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  const get = (withId) => navigator.mediaDevices.getUserMedia({ [kind]: withId && id ? { ...base, deviceId: { exact: id } } : base });
   try {
-    const stream = await navigator.mediaDevices.getUserMedia(kind === 'video'
-      ? { video: { width: { ideal: 1280 }, height: { ideal: 720 } } }
-      : { audio: { echoCancellation: true, noiseSuppression: true } });
+    if (!navigator.mediaDevices?.getUserMedia) throw Object.assign(new Error(), { name: 'SecurityError' });
+    let stream;
+    try { stream = await get(true); } catch (e) {
+      if (id && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError')) stream = await get(false);
+      else throw e;
+    }
     S.local[kind] = stream.getTracks()[0];
+    S.local[kind].onended = () => { if (S.local[kind]?.readyState === 'ended') { S.local[kind] = null; afterLocalChange(); } };
     return true;
   } catch (e) {
-    toast(kind === 'video' ? 'Нет доступа к камере' : 'Нет доступа к микрофону');
+    console.warn(kind, e);
+    toast(mediaError(kind, e), 6000);
     return false;
   }
 }
@@ -91,17 +133,81 @@ function stopLocal(kind) {
   S.local[kind] = null;
 }
 
+function afterLocalChange() {
+  if (S.joined) { pushVideoTrack(); pushAudioTrack(); sendMedia(); updateButtons(); } else updatePrejoin();
+}
+
+// индикатор громкости своего микрофона
+const levelBuf = new Uint8Array(512);
+let levelAnalyser = null, levelTrack = null;
+setInterval(() => {
+  const track = S.local.audio;
+  if (track !== levelTrack) {
+    levelTrack = track;
+    levelAnalyser = null;
+    if (track && ensureAudioCtx()) {
+      try {
+        levelAnalyser = audioCtx.createAnalyser();
+        levelAnalyser.fftSize = 512;
+        audioCtx.createMediaStreamSource(new MediaStream([track])).connect(levelAnalyser);
+      } catch (e) { levelAnalyser = null; }
+    }
+  }
+  let v = 0;
+  if (levelAnalyser) {
+    levelAnalyser.getByteTimeDomainData(levelBuf);
+    let sum = 0;
+    for (let i = 0; i < levelBuf.length; i++) { const x = (levelBuf[i] - 128) / 128; sum += x * x; }
+    v = Math.min(100, Math.sqrt(sum / levelBuf.length) * 400);
+  }
+  $('#preLevel').style.width = v + '%';
+  $('#devLevel').style.width = v + '%';
+}, 80);
+
+// ---------- Выбор устройств ----------
+async function openDevices() {
+  ensureAudioCtx();
+  $('#devicesModal').classList.remove('hidden');
+  let list = [];
+  try { list = await navigator.mediaDevices.enumerateDevices(); } catch (e) {}
+  const fill = (sel, kind, cur, label) => {
+    const items = list.filter((d) => d.kind === kind);
+    sel.innerHTML = '<option value="">По умолчанию</option>' + items.map((d, i) =>
+      `<option value="${esc(d.deviceId)}" ${d.deviceId === cur ? 'selected' : ''}>${esc(d.label || `${label} ${i + 1}`)}</option>`).join('');
+  };
+  fill($('#devMic'), 'audioinput', S.dev.mic, 'Микрофон');
+  fill($('#devCam'), 'videoinput', S.dev.cam, 'Камера');
+  fill($('#devSpk'), 'audiooutput', S.dev.spk, 'Динамики');
+  $('#devSpkWrap').classList.toggle('hidden', !('setSinkId' in HTMLMediaElement.prototype) || !list.some((d) => d.kind === 'audiooutput'));
+  if (!list.some((d) => d.label)) $('#devMic').insertAdjacentHTML('beforeend', '');
+}
+const closeDevices = () => $('#devicesModal').classList.add('hidden');
+$('#devClose').onclick = $('#devDone').onclick = closeDevices;
+$('#devicesModal').onclick = (e) => { if (e.target.id === 'devicesModal') closeDevices(); };
+$('#devMic').onchange = async () => {
+  S.dev.mic = $('#devMic').value; localStorage.setItem('devMic', S.dev.mic);
+  if (S.local.audio) { stopLocal('audio'); await startLocal('audio'); afterLocalChange(); }
+};
+$('#devCam').onchange = async () => {
+  S.dev.cam = $('#devCam').value; localStorage.setItem('devCam', S.dev.cam);
+  if (S.local.video) { stopLocal('video'); await startLocal('video'); afterLocalChange(); }
+};
+$('#devSpk').onchange = () => { S.dev.spk = $('#devSpk').value; localStorage.setItem('devSpk', S.dev.spk); applySink(); };
+function applySink() {
+  if (!S.dev.spk) return;
+  for (const el of [pbVideo, stageVideo, ...[...S.tiles.values()].map((t) => t.video)]) el.setSinkId?.(S.dev.spk).catch(() => {});
+}
+
+// ---------- Вход ----------
 $('#joinBtn').onclick = () => {
   const name = $('#nameInput').value.trim();
   if (!name) { $('#nameInput').focus(); return toast('Введите имя'); }
   localStorage.setItem('confName', name);
-  // Создаём аудиоконтекст и «разблокируем» видео в момент клика — чтобы потом звук записи шёл без ограничений автозапуска
-  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (e) {}
-  pbVideo.play().catch(() => {});
-  const asHost = S.isAdmin && $('#asHost').checked;
-  const hidden = asHost && $('#asHidden').checked;
+  // создаём аудиоконтекст и «разблокируем» видео в момент клика — чтобы потом звук шёл без ограничений автозапуска
+  ensureAudioCtx();
+  pbVideo.muted = true; pbVideo.play().catch(() => {}); pbVideo.pause(); pbVideo.muted = false;
   $('#joinBtn').disabled = true;
-  socket.emit('join', { roomId, name, asHost, hidden }, (res) => {
+  socket.emit('join', { roomId, name, asHost: S.isOwner, hidden: S.observer }, (res) => {
     $('#joinBtn').disabled = false;
     if (res?.error) { $('#preError').textContent = res.error; return; }
     if (res.status === 'waiting') {
@@ -129,7 +235,7 @@ function showEnd(title, text) {
   show('end');
 }
 
-// ---------- Вход во встречу ----------
+// ---------- Встреча ----------
 socket.on('joined', ({ self, peers, room, playback, chat }) => {
   S.joined = true;
   S.self = self;
@@ -140,17 +246,24 @@ socket.on('joined', ({ self, peers, room, playback, chat }) => {
   if (!S.perms.allowCam) stopLocal('video');
   if (!S.perms.allowMic) stopLocal('audio');
   show('meeting');
-  $('#btnScreen').classList.toggle('hidden', S.role !== 'host' || self.hidden);
+  const host = S.role === 'host';
+  $('#btnScreen').classList.toggle('hidden', !host || self.hidden);
+  $('#btnManage').classList.toggle('hidden', !host);
+  $('#tabManage').classList.toggle('hidden', !host);
+  $('#observerBadge').classList.toggle('hidden', !self.hidden);
   applyRoom(room);
   $('#chatList').innerHTML = '';
   chat.forEach(addChat);
-  S.unread = 0;
+  S.unread = 0; updateUnread();
   for (const info of peers) addPeer(info).initiate = true;
   for (const info of peers) callPeer(info.id);
   applyPlayback(playback);
   sendMedia();
   updateButtons();
-  if (S.role === 'host') socket.emit('admin:watch', { roomId });
+  if (host) {
+    socket.emit('admin:watch', { roomId });
+    api('/api/recordings').then((r) => { S.recordings = r; renderManage(); }).catch(() => {});
+  }
   layout();
 });
 
@@ -187,6 +300,8 @@ socket.on('participants', (list) => {
 socket.on('room-updated', (room) => applyRoom(room));
 socket.on('playback', (pb) => applyPlayback(pb));
 socket.on('chat', (msg) => addChat(msg));
+socket.on('chat-cleared', () => { $('#chatList').innerHTML = ''; });
+socket.on('emojis-updated', () => loadEmojis(roomId));
 socket.on('signal', ({ from, data }) => {
   const peer = S.peers.get(from);
   if (!peer) return;
@@ -211,27 +326,33 @@ socket.on('force-mute', () => {
   stopLocal('audio'); pushAudioTrack(); sendMedia(); updateButtons();
   toast('Организатор выключил ваш микрофон');
 });
+socket.on('force-cam-off', () => {
+  if (!S.local.video) return;
+  stopLocal('video'); pushVideoTrack(); sendMedia(); updateButtons();
+  toast('Организатор выключил вашу камеру');
+});
 socket.on('lower-hand', () => { S.hand = false; updateButtons(); });
 
 socket.on('admin:state', (st) => {
+  const prevWaiting = S.adminState?.waiting.length || 0;
   S.adminState = st;
   const n = st.waiting.length;
   $('#waitCount').textContent = n;
   $('#waitCount').classList.toggle('hidden', !n);
-  if (n && S.side !== 'people') toast(`В зале ожидания: ${n}`, 2500);
+  if (n > prevWaiting && S.side !== 'people') toast(`В зале ожидания: ${n}`, 2500);
   renderPeople();
+  renderManage();
 });
 
 function applyRoom(room) {
-  const prevVisible = S.room?.presenter?.visible;
   S.room = room;
   $('#meetTitle').textContent = room.name;
   document.title = room.name;
   const canChat = room.allowChat || S.role === 'host';
   $('#chatInput').disabled = !canChat;
   $('#chatInput').placeholder = canChat ? 'Сообщение всем' : 'Чат отключён организатором';
-  if (prevVisible !== room.presenter.visible) layout();
-  else layout();
+  $('#btnReact').disabled = !(room.allowReactions || S.role === 'host') || !!S.self?.hidden;
+  layout();
 }
 
 // ---------- WebRTC ----------
@@ -251,6 +372,7 @@ function removePeer(id) {
   S.peers.delete(id);
   const t = S.tiles.get(id);
   if (t) { t.el.remove(); S.tiles.delete(id); }
+  meters.delete(id);
   layout();
 }
 
@@ -260,18 +382,24 @@ function newPC(id) {
   const peer = S.peers.get(id);
   peer.pc?.close();
   peer.stream = new MediaStream();
+  peer.pending = [];
   const pc = new RTCPeerConnection({ iceServers: S.iceServers });
   peer.pc = pc;
   pc.onicecandidate = (e) => { if (e.candidate) socket.emit('signal', { to: id, data: { candidate: e.candidate } }); };
   pc.ontrack = (e) => {
     peer.stream.getTracks().filter((t) => t.kind === e.track.kind).forEach((t) => peer.stream.removeTrack(t));
     peer.stream.addTrack(e.track);
-    e.track.onunmute = () => layout();
+    e.track.onunmute = () => {
+      const t = S.tiles.get(id);
+      if (t) safePlay(t.video);
+      layout();
+    };
     layout();
   };
   pc.onconnectionstatechange = () => {
     // если соединение оборвалось — инициатор переподключается
-    if (pc.connectionState === 'failed' && peer.initiate && S.peers.get(id) === peer) callPeer(id);
+    if (pc.connectionState === 'failed' && peer.initiate && S.peers.get(id) === peer) setTimeout(() => callPeer(id), 1000);
+    layout();
   };
   return pc;
 }
@@ -331,35 +459,47 @@ function sendMedia() {
   layout();
 }
 
+// ---------- Автовоспроизведение ----------
+function safePlay(el) {
+  if (!el || !el.srcObject && !el.src) return;
+  el.play().catch((err) => {
+    if (err.name !== 'NotAllowedError') return;
+    blockedMedia.add(el);
+    $('#unmuteBtn').classList.remove('hidden');
+  });
+}
+$('#unmuteBtn').onclick = () => {
+  ensureAudioCtx();
+  pbVideo.muted = false;
+  for (const el of blockedMedia) el.play().catch(() => {});
+  blockedMedia.clear();
+  if (S.playback?.status === 'playing') pbVideo.play().catch(() => {});
+  $('#unmuteBtn').classList.add('hidden');
+};
+
 // ---------- Кнопки ----------
-function setCtrl(btn, { icon, text, off, disabled, locked }) {
-  btn.querySelector('.i').textContent = icon;
+function setCtrl(btn, { icon, text, off, on, disabled, locked }) {
+  btn.querySelector('.ib .i').style.setProperty('--ic', `url(/icons/${icon}.svg)`);
   btn.querySelector('.t').textContent = text;
   btn.classList.toggle('off', !!off);
+  btn.classList.toggle('on', !!on);
   btn.disabled = !!disabled;
   let lock = btn.querySelector('.lock');
-  if (locked && !lock) { lock = document.createElement('span'); lock.className = 'lock'; lock.textContent = '🔒'; btn.appendChild(lock); }
+  if (locked && !lock) { btn.insertAdjacentHTML('beforeend', `<span class="lock" title="Запрещено организатором">${ic('lock', 'sm')}</span>`); }
   if (!locked && lock) lock.remove();
 }
 
 function updateButtons() {
   const hidden = S.self?.hidden;
-  setCtrl($('#btnMic'), {
-    icon: S.local.audio ? '🎤' : '🔇',
-    text: S.local.audio ? 'Выкл. звук' : 'Вкл. звук',
-    off: !S.local.audio, disabled: hidden, locked: !S.perms.allowMic,
-  });
-  setCtrl($('#btnCam'), {
-    icon: '📷',
-    text: S.local.video ? 'Остановить видео' : 'Начать видео',
-    off: !S.local.video, disabled: hidden, locked: !S.perms.allowCam,
-  });
-  setCtrl($('#btnScreen'), { icon: '🖥', text: S.local.screen ? 'Остановить показ' : 'Демонстрация', off: false });
-  setCtrl($('#btnHand'), { icon: '✋', text: S.hand ? 'Опустить руку' : 'Поднять руку', off: false, disabled: hidden });
-  $('#btnHand').classList.toggle('off', S.hand);
+  setCtrl($('#btnMic'), { icon: S.local.audio ? 'mic' : 'mic-off', text: S.local.audio ? 'Микрофон' : 'Вкл. звук', off: !S.local.audio, disabled: hidden, locked: !S.perms.allowMic && !hidden });
+  setCtrl($('#btnCam'), { icon: S.local.video ? 'video' : 'video-off', text: S.local.video ? 'Камера' : 'Вкл. видео', off: !S.local.video, disabled: hidden, locked: !S.perms.allowCam && !hidden });
+  setCtrl($('#btnScreen'), { icon: S.local.screen ? 'monitor-x' : 'monitor-up', text: S.local.screen ? 'Стоп показ' : 'Экран', on: !!S.local.screen });
+  setCtrl($('#btnHand'), { icon: 'hand', text: S.hand ? 'Опустить' : 'Рука', on: S.hand, disabled: hidden });
+  updatePeopleCount();
 }
 
 $('#btnMic').onclick = async () => {
+  ensureAudioCtx();
   if (S.local.audio) stopLocal('audio');
   else {
     if (!S.perms.allowMic) return toast('Организатор не разрешил включать микрофон');
@@ -390,6 +530,7 @@ $('#btnScreen').onclick = async () => {
 };
 
 $('#btnHand').onclick = () => { S.hand = !S.hand; socket.emit('hand', S.hand); updateButtons(); };
+$('#btnSettings').onclick = () => openDevices();
 
 $('#btnLeave').onclick = () => {
   socket.emit('leave');
@@ -400,16 +541,18 @@ function openSide(which) {
   if (S.side === which) which = null;
   S.side = which;
   $('#side').classList.toggle('hidden', !which);
-  $('#peoplePanel').classList.toggle('hidden', which !== 'people');
-  $('#chatPanel').classList.toggle('hidden', which !== 'chat');
+  for (const p of ['people', 'chat', 'manage']) $(`#${p}Panel`).classList.toggle('hidden', which !== p);
+  $$('[data-side]').forEach((b) => b.classList.toggle('active', b.dataset.side === which));
   $('#chatForm').classList.toggle('hidden', which !== 'chat');
-  $('#sideTitle').textContent = which === 'chat' ? 'Чат' : 'Участники';
   if (which === 'chat') { S.unread = 0; updateUnread(); $('#chatInput').focus(); scrollChat(); }
   if (which === 'people') renderPeople();
+  if (which === 'manage') renderManage();
   layout();
 }
 $('#btnPeople').onclick = () => openSide('people');
 $('#btnChat').onclick = () => openSide('chat');
+$('#btnManage').onclick = () => openSide('manage');
+$$('[data-side]').forEach((b) => (b.onclick = () => S.side !== b.dataset.side && openSide(b.dataset.side)));
 $('#sideClose').onclick = () => openSide(null);
 
 // ---------- Чат ----------
@@ -417,7 +560,7 @@ function addChat(msg) {
   const el = document.createElement('div');
   el.className = 'chat-msg';
   const time = new Date(msg.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-  el.innerHTML = `<div class="who"><b>${esc(msg.name)}</b> · ${time}</div><div class="txt">${chatHtml(msg.text)}</div>`;
+  el.innerHTML = `${avatarHtml(msg.name)}<div class="grow"><div class="who"><b>${esc(msg.name)}</b>${time}</div><div class="txt ${isJumbo(msg.text) ? 'jumbo' : ''}">${chatHtml(msg.text)}</div></div>`;
   $('#chatList').appendChild(el);
   if (S.side !== 'chat') { S.unread++; updateUnread(); }
   scrollChat();
@@ -436,16 +579,14 @@ $('#chatForm').onsubmit = (e) => {
 };
 
 // ---------- Реакции и эмодзи ----------
-$('#btnReact').onclick = (e) => {
-  e.stopPropagation();
-  if (S.self?.hidden) return toast('В режиме наблюдателя реакции недоступны');
-  emojiPicker($('#btnReact'), (code) => socket.emit('reaction', code));
+$('#btnReact').onclick = () => {
+  if (S.self?.hidden) return;
+  emojiPicker($('#btnReact'), (code) => socket.emit('reaction', code), { quick: true });
 };
-$('#chatEmoji').onclick = (e) => {
-  e.stopPropagation();
-  emojiPicker($('#chatEmoji'), (code, name) => {
+$('#chatEmoji').onclick = () => {
+  emojiPicker($('#chatEmoji'), (code, text) => {
     const inp = $('#chatInput');
-    inp.value += name ? `:${name}:` : code;
+    inp.value += text;
     inp.focus();
   });
 };
@@ -453,14 +594,14 @@ socket.on('reaction', ({ from, emoji }) => {
   const key = from === socket.id ? SELF : from;
   const t = S.tiles.get(key);
   if (!t) return;
+  const who = key === SELF ? 'Вы' : key === PRESENTER ? S.room?.presenter?.name : S.peers.get(key)?.info.name;
   const el = document.createElement('div');
   el.className = 'reaction';
-  el.style.left = 10 + Math.random() * 60 + '%';
-  el.innerHTML = emojiHtml(emoji);
+  el.style.left = 8 + Math.random() * 62 + '%';
+  el.innerHTML = emojiHtml(emoji, '') + (who ? `<span class="who">${esc(who)}</span>` : '');
   t.el.appendChild(el);
-  setTimeout(() => el.remove(), 3600);
+  setTimeout(() => el.remove(), 3700);
 });
-socket.on('emojis-updated', () => loadEmojis());
 
 // ---------- Участники ----------
 function presenterInfo() {
@@ -472,7 +613,14 @@ function presenterInfo() {
   return { id: PRESENTER, name: pr.name, cam: !!active, mic: playing, hand: false };
 }
 
+function updatePeopleCount() {
+  let n = [...S.peers.values()].filter((p) => !p.info.hidden).length + (S.self && !S.self.hidden ? 1 : 0);
+  if (presenterInfo()) n++;
+  $('#peopleCount').textContent = n;
+}
+
 function renderPeople() {
+  updatePeopleCount();
   if (S.side !== 'people') return;
   const isHost = S.role === 'host' && S.adminState;
   $('#hostControls').classList.toggle('hidden', !isHost);
@@ -483,10 +631,47 @@ function renderPeople() {
   if (pres) list.push({ ...pres, tag: 'организатор' });
   for (const p of S.peers.values()) if (!p.info.hidden) list.push({ ...p.info, tag: p.info.role === 'host' ? 'организатор' : '' });
   if (S.self && !S.self.hidden) list.push({ ...S.self, label: S.self.name + ' (вы)', cam: !!S.local.video, mic: !!S.local.audio, hand: S.hand });
-  $('#peopleList').innerHTML = `<div class="section-title">Участники (${list.length})</div>` + list.map((p) => `
-    <li><div class="mini-avatar" style="background:${avatarColor(p.name)}">${esc(initials(p.name))}</div>
-      <div class="nm">${esc(p.label || p.name)} ${p.tag ? `<span class="badge">${p.tag}</span>` : ''}</div>
-      <div class="icons">${p.hand ? '✋' : ''}<span>${p.mic ? '🎤' : '🔇'}</span><span>${p.cam ? '📷' : '<span class="muted">📷✕</span>'}</span></div></li>`).join('');
+  $('#peopleList').innerHTML = `<div class="section-title">В комнате · ${list.length}</div>` + list.map((p) => `
+    <li>${avatarHtml(p.name)}
+      <div class="nm"><div>${esc(p.label || p.name)} ${p.tag ? `<span class="badge accent">${p.tag}</span>` : ''}</div></div>
+      <div class="icons">${p.hand ? ic('hand', 'sm') : ''}${p.mic ? ic('mic', 'sm') : `<span class="off">${ic('mic-off', 'sm')}</span>`}${p.cam ? ic('video', 'sm') : `<span class="faint">${ic('video-off', 'sm')}</span>`}</div></li>`).join('');
+}
+
+// ---------- Управление встречей (ведущий) ----------
+function renderManage() {
+  if (S.side !== 'manage' || !S.adminState) return;
+  const { room, playback } = S.adminState;
+  const panel = $('#managePanel');
+  const recOptions = S.recordings.map((r) => `<option value="${r.id}" ${r.id === (playback.recordingId || room.playback.recordingId) ? 'selected' : ''}>${esc(r.title)}${r.duration ? ' · ' + fmtTime(r.duration) : ''}</option>`).join('');
+  const status = { idle: '<span class="badge">не запущена</span>', playing: '<span class="badge live">идёт</span>', paused: '<span class="badge warn">пауза</span>', ended: '<span class="badge">закончилась</span>' }[playback.status];
+  const focused = document.activeElement && panel.contains(document.activeElement) && document.activeElement.tagName === 'SELECT';
+  if (focused) return;
+  panel.innerHTML = `
+    <div class="section-title">Доступ</div>
+    ${switchesHtml(room.settings, 'data-mset')}
+    <div class="section-title">Запись ${status}</div>
+    <select id="mRec" style="margin-bottom:8px">${recOptions || '<option value="">Нет записей</option>'}</select>
+    <div class="small muted" style="margin-bottom:8px">${playback.title ? esc(playback.title) + ' · ' : ''}${fmtTime(playback.position)}${playback.duration ? ' / ' + fmtTime(playback.duration) : ''}</div>
+    <div class="row" style="gap:6px">
+      <button class="btn sm ok" data-pb="start">${ic('play', 'sm')} Сначала</button>
+      ${playback.status === 'playing' ? `<button class="btn sm" data-pb="pause">${ic('pause', 'sm')} Пауза</button>` : ''}
+      ${playback.status === 'paused' ? `<button class="btn sm" data-pb="resume">${ic('play', 'sm')} Дальше</button>` : ''}
+      ${playback.status !== 'idle' ? `<button class="btn sm danger" data-pb="stop">${ic('square', 'sm')} Стоп</button>` : ''}
+    </div>
+    <div class="section-title">Встреча</div>
+    <div class="row" style="gap:6px">
+      <button class="btn sm" id="mCopy">${ic('link', 'sm')} Ссылка</button>
+      <a class="btn sm" href="/admin/room/${encodeURIComponent(roomId)}" target="_blank">${ic('external-link', 'sm')} Пульт</a>
+      <button class="btn sm danger" id="mEnd">${ic('phone-off', 'sm')} Завершить для всех</button>
+    </div>`;
+  $$('[data-mset]', panel).forEach((el) => (el.onchange = () => socket.emit('admin:settings', { roomId, settings: { [el.dataset.mset]: el.checked } })));
+  $$('[data-pb]', panel).forEach((b) => (b.onclick = () => {
+    const action = b.dataset.pb;
+    if (action === 'stop' && !confirm('Остановить запись у всех?')) return;
+    socket.emit('admin:playback', { roomId, action, recordingId: $('#mRec').value || undefined });
+  }));
+  $('#mCopy').onclick = async () => { await navigator.clipboard.writeText(`${location.origin}/r/${roomId}`).catch(() => {}); toast('Ссылка скопирована'); };
+  $('#mEnd').onclick = () => { if (confirm('Завершить встречу для всех участников?')) socket.emit('admin:end', { roomId }); };
 }
 
 // ---------- Плитки и раскладка ----------
@@ -495,28 +680,32 @@ function ensureTile(key) {
   if (t) return t;
   const el = document.createElement('div');
   el.className = 'tile';
-  el.innerHTML = '<div class="avatar"><span></span></div><div class="hand hidden">✋</div><div class="name"><span class="mic"></span><b></b></div>';
+  el.innerHTML = `<div class="avatar"><span></span></div><img class="hand hidden" alt="">
+    <div class="net hidden">${ic('triangle-alert', 'sm')} связь</div>
+    <div class="name"><span class="mic"></span><b></b></div>`;
   const video = document.createElement('video');
   video.autoplay = true; video.playsInline = true;
+  if (S.dev.spk) video.setSinkId?.(S.dev.spk).catch(() => {});
   el.prepend(video);
-  t = { el, video, avatar: $('.avatar', el), nameEl: $('.name b', el), micEl: $('.name .mic', el), handEl: $('.hand', el) };
+  t = { el, video, avatar: $('.avatar', el), nameEl: $('.name b', el), micEl: $('.name .mic', el), handEl: $('.hand', el), netEl: $('.net', el) };
+  t.handEl.src = emojiSrc('✋');
   S.tiles.set(key, t);
   return t;
 }
 
-function setTile(t, { name, label, cam, mic, hand, stream, mirror, muted }) {
+function setTile(t, { name, label, cam, mic, hand, stream, mirror, muted, net }) {
   t.nameEl.textContent = label || name;
-  t.micEl.textContent = mic ? '' : '🔇';
-  t.micEl.className = 'mic ico-muted';
+  t.micEl.innerHTML = mic ? '' : ic('mic-off', 'sm');
   t.handEl.classList.toggle('hidden', !hand);
+  t.netEl.classList.toggle('hidden', !net);
   const sp = $('span', t.avatar);
   sp.textContent = initials(name);
   sp.style.background = avatarColor(name);
+  t.video.muted = !!muted;
   if (stream !== undefined && t.video.srcObject !== stream) {
     t.video.srcObject = stream;
-    t.video.play().catch(() => {});
+    safePlay(t.video);
   }
-  t.video.muted = !!muted;
   t.video.classList.toggle('mirror', !!mirror);
   // видео не скрываем через display:none, чтобы звук продолжал играть
   t.video.style.visibility = cam ? 'visible' : 'hidden';
@@ -547,16 +736,18 @@ function layout() {
   for (const p of sorted) {
     const t = ensureTile(p.info.id);
     const hasVideo = p.info.cam && p.stream.getVideoTracks().some((tr) => tr.readyState === 'live');
-    setTile(t, { name: p.info.name, cam: hasVideo, mic: p.info.mic, hand: p.info.hand, stream: p.stream });
+    const net = ['failed', 'disconnected'].includes(p.pc?.connectionState);
+    setTile(t, { name: p.info.name, cam: hasVideo, mic: p.info.mic, hand: p.info.hand, stream: p.stream, net });
     keys.push(p.info.id);
   }
-  // свои плитки
+  // невидимые участники: плитку не показываем, но звук их микрофона не нужен — они без медиа
+  // своя плитка
   if (S.self && !S.self.hidden) {
     const t = ensureTile(SELF);
     const track = currentVideoTrack();
     if (t.localTrack !== track) {
       t.localTrack = track;
-      setTile(t, { name: S.self.name, stream: track ? new MediaStream([track]) : null });
+      setTile(t, { name: S.self.name, stream: track ? new MediaStream([track]) : null, muted: true });
     }
     setTile(t, { name: S.self.name, label: S.self.name + ' (вы)', cam: !!track, mic: !!S.local.audio, hand: S.hand, mirror: !S.local.screen, muted: true });
     keys.splice(pres ? 1 : 0, 0, SELF);
@@ -571,27 +762,27 @@ function layout() {
   }
   keys.forEach((k, i) => { const el = S.tiles.get(k).el; if (grid.children[i] !== el) grid.insertBefore(el, grid.children[i] || null); });
 
-  // сцена: запись в режиме «презентация» или демонстрация экрана участником
+  // сцена: запись в режиме «презентация» или демонстрация экрана
   const stage = $('#stage');
   let stageOn = false;
   if (pbActive && S.room.presenter.display === 'presentation') {
     stageOn = true;
     if (pbVideo.parentNode !== stage) stage.prepend(pbVideo);
     pbVideo.style.visibility = 'visible';
-    $('#stageLabel').textContent = `${S.room.presenter.name} — демонстрация экрана`;
+    $('#stageLabel').innerHTML = `${ic('presentation', 'sm')} ${esc(S.room.presenter.name)} — демонстрация экрана`;
     stageVideo.remove();
   } else {
     const sharer = sorted.find((p) => p.info.screen);
     if (sharer) {
       stageOn = true;
-      if (stageVideo.srcObject !== sharer.stream) { stageVideo.srcObject = sharer.stream; stageVideo.play().catch(() => {}); }
+      if (stageVideo.srcObject !== sharer.stream) { stageVideo.srcObject = sharer.stream; safePlay(stageVideo); }
       if (stageVideo.parentNode !== stage) stage.prepend(stageVideo);
-      $('#stageLabel').textContent = `${sharer.info.name} — демонстрация экрана`;
+      $('#stageLabel').innerHTML = `${ic('monitor-up', 'sm')} ${esc(sharer.info.name)} — демонстрация экрана`;
     } else if (S.local.screen) {
       stageOn = true;
       if (stageVideo.srcObject?.getVideoTracks()[0] !== S.local.screen) stageVideo.srcObject = new MediaStream([S.local.screen]);
       if (stageVideo.parentNode !== stage) stage.prepend(stageVideo);
-      $('#stageLabel').textContent = 'Вы показываете экран';
+      $('#stageLabel').innerHTML = `${ic('monitor-up', 'sm')} Вы показываете экран`;
     } else {
       stageVideo.remove();
     }
@@ -629,6 +820,7 @@ pbVideo.disablePictureInPicture = true;
 pbVideo.setAttribute('disableRemotePlayback', '');
 pbVideo.oncontextmenu = (e) => e.preventDefault();
 pbVideo.style.pointerEvents = 'none';
+if (S.dev.spk) pbVideo.setSinkId?.(S.dev.spk).catch(() => {});
 
 function expectedPos() {
   const p = S.playback;
@@ -643,7 +835,6 @@ function applyPlayback(pb) {
   if (active) {
     const abs = new URL(pb.url, location.href).href;
     if (pbVideo.src !== abs) { pbVideo.src = abs; pbVideo.load(); }
-    connectPresenterAudio();
     syncVideo(true);
   } else {
     pbVideo.pause();
@@ -671,7 +862,7 @@ function syncVideo(force) {
 setInterval(() => syncVideo(false), 3000);
 
 function playPb() {
-  pbVideo.play().catch((err) => {
+  pbVideo.play().then(connectPresenterAudio).catch((err) => {
     if (err.name !== 'NotAllowedError') return;
     // браузер запретил автозапуск со звуком — играем без звука и просим нажать кнопку
     pbVideo.muted = true;
@@ -679,24 +870,15 @@ function playPb() {
     $('#unmuteBtn').classList.remove('hidden');
   });
 }
-$('#unmuteBtn').onclick = () => {
-  pbVideo.muted = false;
-  audioCtx?.resume();
-  pbVideo.play().catch(() => {});
-  $('#unmuteBtn').classList.add('hidden');
-};
 
 // ---------- Индикатор «говорит» ----------
 const meters = new Map(); // key -> analyser
 function connectPresenterAudio() {
-  if (meters.has(PRESENTER) || !audioCtx || audioCtx.state !== 'running') return;
+  // звук записи не пропускаем через WebAudio (иначе на iPhone он может пропасть) — только снимаем копию в Chrome
+  if (meters.has(PRESENTER) || !pbVideo.captureStream || pbVideo.mozCaptureStream || !ensureAudioCtx()) return;
   try {
-    const src = audioCtx.createMediaElementSource(pbVideo);
-    const an = audioCtx.createAnalyser();
-    an.fftSize = 512;
-    src.connect(an);
-    an.connect(audioCtx.destination);
-    meters.set(PRESENTER, an);
+    const track = pbVideo.captureStream().getAudioTracks()[0];
+    if (track) meterFor(PRESENTER, track);
   } catch (e) {}
 }
 
@@ -722,18 +904,26 @@ function level(an) {
   return Math.sqrt(sum / an.fftSize);
 }
 
+let fakeTalk = 0;
 setInterval(() => {
   if (!S.joined) return;
+  fakeTalk = (fakeTalk + 1) % 1000;
   for (const [key, t] of S.tiles) {
-    let an = null, on = false;
-    if (key === PRESENTER) { an = meters.get(PRESENTER); on = S.playback?.status === 'playing'; }
-    else if (key === SELF) { an = meterFor(SELF, S.local.audio); on = !!S.local.audio; }
-    else {
+    let speaking = false;
+    if (key === PRESENTER) {
+      const an = meters.get(PRESENTER);
+      const playing = S.playback?.status === 'playing' && !pbVideo.paused;
+      // если анализ звука недоступен (Safari/Firefox) — подсвечиваем ведущего, пока идёт запись
+      speaking = playing && (an ? level(an) > 0.03 : fakeTalk % 12 < 9);
+    } else if (key === SELF) {
+      const an = meterFor(SELF, S.local.audio);
+      speaking = !!S.local.audio && !!an && level(an) > 0.04;
+    } else {
       const p = S.peers.get(key);
-      an = p && meterFor(key, p.stream.getAudioTracks()[0]);
-      on = !!p?.info.mic;
+      const an = p && meterFor(key, p.stream.getAudioTracks()[0]);
+      speaking = !!p?.info.mic && !!an && level(an) > 0.04;
     }
-    t.el.classList.toggle('speaking', !!(on && an && level(an) > 0.04));
+    t.el.classList.toggle('speaking', speaking);
   }
 }, 200);
 

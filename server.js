@@ -9,9 +9,11 @@ const { Server } = require('socket.io');
 const db = require('./lib/db');
 
 const PORT = process.env.PORT || 3000;
+const ADMIN_LOGIN = (process.env.ADMIN_LOGIN || 'admin').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB, 10) || 4096;
-const SESSION_TTL = 1000 * 60 * 60 * 24 * 7;
+const SESSION_TTL = 1000 * 60 * 60 * 24 * 14;
+const APPLE_EMOJI_CDN = 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@16.0.0/img/apple/64/';
 
 if (!process.env.ADMIN_PASSWORD) {
   console.warn('⚠  ADMIN_PASSWORD не задан — используется пароль по умолчанию "admin". Обязательно поменяйте его!');
@@ -25,8 +27,21 @@ const io = new Server(server, { maxHttpBufferSize: 1e6 });
 
 app.use(express.json());
 
-// ---------- Авторизация администратора ----------
-const sessions = new Map(); // token -> expiresAt
+// ---------- Авторизация ----------
+// Токен подписан секретом и хранит id админа и срок, поэтому вход переживает перезапуск сервера.
+const SECRET_FILE = path.join(path.dirname(db.UPLOAD_DIR), 'secret.key');
+if (!fs.existsSync(SECRET_FILE)) fs.writeFileSync(SECRET_FILE, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
+const SECRET = fs.readFileSync(SECRET_FILE, 'utf8').trim();
+
+const OWNER = { id: db.OWNER_ID, login: ADMIN_LOGIN, name: 'Главный администратор', role: 'owner' };
+
+// при смене пароля старые входы перестают действовать
+const passwordStamp = (userId) => (userId === db.OWNER_ID ? ADMIN_PASSWORD : db.getUser(userId)?.hash || '');
+
+function signToken(userId, exp) {
+  const mac = crypto.createHmac('sha256', SECRET).update(`${userId}.${exp}.${passwordStamp(userId)}`).digest('hex');
+  return `${userId}.${exp}.${mac}`;
+}
 
 function parseCookies(header) {
   const out = {};
@@ -37,17 +52,24 @@ function parseCookies(header) {
   return out;
 }
 
-function isAdminCookie(cookieHeader) {
-  const token = parseCookies(cookieHeader).sid;
-  const exp = token && sessions.get(token);
-  if (!exp) return false;
-  if (exp < Date.now()) { sessions.delete(token); return false; }
-  return true;
+function userFromCookie(cookieHeader) {
+  const token = parseCookies(cookieHeader).sid || '';
+  const [userId, exp] = token.split('.');
+  if (!userId || !(Number(exp) > Date.now())) return null;
+  const expected = signToken(userId, exp);
+  if (expected.length !== token.length || !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(token))) return null;
+  if (userId === db.OWNER_ID) return OWNER;
+  const u = db.getUser(userId);
+  return u ? { id: u.id, login: u.login, name: u.name, role: 'admin' } : null;
 }
 
 function requireAdmin(req, res, next) {
-  if (isAdminCookie(req.headers.cookie)) return next();
+  req.user = userFromCookie(req.headers.cookie);
+  if (req.user) return next();
   res.status(401).json({ error: 'Требуется вход администратора' });
+}
+function requireOwner(req, res, next) {
+  requireAdmin(req, res, () => (req.user.role === 'owner' ? next() : res.status(403).json({ error: 'Только для главного администратора' })));
 }
 
 function safeEqual(a, b) {
@@ -61,27 +83,37 @@ app.post('/api/login', (req, res) => {
   const ip = req.ip;
   const a = loginAttempts.get(ip) || { count: 0, until: 0 };
   if (a.until > Date.now()) return res.status(429).json({ error: 'Слишком много попыток, подождите минуту' });
-  if (!safeEqual(req.body?.password || '', ADMIN_PASSWORD)) {
+  const login = String(req.body?.login || ADMIN_LOGIN).trim().toLowerCase();
+  const password = String(req.body?.password || '');
+  let userId = null;
+  if (login === ADMIN_LOGIN) {
+    if (safeEqual(password, ADMIN_PASSWORD)) userId = db.OWNER_ID;
+  } else {
+    const u = db.findUserByLogin(login);
+    if (u && db.checkPassword(u, password)) userId = u.id;
+  }
+  if (!userId) {
     a.count += 1;
     if (a.count >= 5) { a.count = 0; a.until = Date.now() + 60_000; }
     loginAttempts.set(ip, a);
-    return res.status(401).json({ error: 'Неверный пароль' });
+    return res.status(401).json({ error: 'Неверный логин или пароль' });
   }
   loginAttempts.delete(ip);
-  const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, Date.now() + SESSION_TTL);
+  const exp = Date.now() + SESSION_TTL;
   const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`);
+  res.setHeader('Set-Cookie', `sid=${signToken(userId, exp)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}${secure}`);
   res.json({ ok: true });
 });
 
 app.post('/api/logout', (req, res) => {
-  sessions.delete(parseCookies(req.headers.cookie).sid);
   res.setHeader('Set-Cookie', 'sid=; HttpOnly; Path=/; Max-Age=0');
   res.json({ ok: true });
 });
 
-app.get('/api/me', (req, res) => res.json({ admin: isAdminCookie(req.headers.cookie) }));
+app.get('/api/me', (req, res) => {
+  const user = userFromCookie(req.headers.cookie);
+  res.json({ admin: !!user, user });
+});
 
 app.get('/api/config', (req, res) => {
   const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
@@ -95,38 +127,94 @@ app.get('/api/config', (req, res) => {
   res.json({ iceServers });
 });
 
+// ---------- Админы (только главный) ----------
+const LOGIN_RE = /^[a-z0-9_.-]{3,32}$/;
+app.get('/api/users', requireOwner, (req, res) => {
+  res.json(db.listUsers().map((u) => ({ ...u, rooms: db.listRooms(u.id).length, recordings: db.listRecordings(u.id).length })));
+});
+app.post('/api/users', requireOwner, (req, res) => {
+  const login = String(req.body?.login || '').trim().toLowerCase();
+  const password = String(req.body?.password || '');
+  if (!LOGIN_RE.test(login)) return res.status(400).json({ error: 'Логин: 3–32 символа, латиница, цифры, _ . -' });
+  if (login === ADMIN_LOGIN || db.findUserByLogin(login)) return res.status(400).json({ error: 'Такой логин уже есть' });
+  if (password.length < 6) return res.status(400).json({ error: 'Пароль — минимум 6 символов' });
+  const u = db.createUser({ login, name: req.body?.name || login, password });
+  res.json({ id: u.id, login: u.login, name: u.name });
+});
+app.patch('/api/users/:id', requireOwner, (req, res) => {
+  const password = String(req.body?.password || '');
+  if (password.length < 6) return res.status(400).json({ error: 'Пароль — минимум 6 символов' });
+  if (!db.setUserPassword(req.params.id, password)) return res.status(404).json({ error: 'Не найдено' });
+  res.json({ ok: true });
+});
+app.delete('/api/users/:id', requireOwner, (req, res) => {
+  for (const r of db.listRooms(req.params.id)) endMeeting(r.id, 'Встреча завершена организатором');
+  db.deleteUser(req.params.id);
+  res.json({ ok: true });
+});
+
+// ---------- Настройки по умолчанию ----------
+app.get('/api/defaults', requireAdmin, (req, res) => res.json(db.getDefaults(req.user.id)));
+app.put('/api/defaults', requireAdmin, (req, res) => {
+  const body = req.body || {};
+  if (body.playback?.recordingId && !ownRecording(req.user, body.playback.recordingId)) return res.status(400).json({ error: 'Запись не найдена' });
+  res.json(db.setDefaults(req.user.id, body));
+});
+
 // ---------- Комнаты ----------
+function ownRoom(req, res) {
+  const room = db.getRoom(req.params.id);
+  if (!room || room.ownerId !== req.user.id) { res.status(404).json({ error: 'Не найдено' }); return null; }
+  return room;
+}
+const ownRecording = (user, id) => { const r = db.getRecording(id); return r && r.ownerId === user.id ? r : null; };
+
 app.get('/api/rooms/:id/public', (req, res) => {
   const room = db.getRoom(req.params.id);
   if (!room) return res.status(404).json({ error: 'Встреча не найдена' });
-  res.json({ id: room.id, name: room.name, allowCamera: room.settings.allowCamera, allowMic: room.settings.allowMic });
+  const user = userFromCookie(req.headers.cookie);
+  res.json({
+    id: room.id, name: room.name,
+    allowCamera: room.settings.allowCamera, allowMic: room.settings.allowMic,
+    isOwner: !!user && user.id === room.ownerId,
+  });
 });
 
-app.get('/api/rooms', requireAdmin, (req, res) => {
-  res.json(db.listRooms().map((r) => ({ ...r, live: liveSummary(r.id) })));
-});
+const roomView = (r) => ({ ...r, live: liveSummary(r.id), nextStart: nextOccurrence(r.playback, Date.now()) });
+
+app.get('/api/rooms', requireAdmin, (req, res) => res.json(db.listRooms(req.user.id).map(roomView)));
 
 app.post('/api/rooms', requireAdmin, (req, res) => {
-  const room = db.createRoom(String(req.body?.name || '').trim().slice(0, 100));
+  const room = db.createRoom(req.user.id, String(req.body?.name || '').trim().slice(0, 100));
+  res.json(room);
+});
+
+app.post('/api/rooms/:id/duplicate', requireAdmin, (req, res) => {
+  const src = ownRoom(req, res);
+  if (!src) return;
+  const room = db.createRoom(req.user.id, `${src.name} (копия)`.slice(0, 100), { settings: src.settings, playback: src.playback });
   res.json(room);
 });
 
 app.get('/api/rooms/:id', requireAdmin, (req, res) => {
-  const room = db.getRoom(req.params.id);
-  if (!room) return res.status(404).json({ error: 'Не найдено' });
-  res.json(room);
+  const room = ownRoom(req, res);
+  if (room) res.json(roomView(room));
 });
 
 app.put('/api/rooms/:id', requireAdmin, (req, res) => {
+  if (!ownRoom(req, res)) return;
+  const rid = req.body?.playback?.recordingId;
+  if (rid && !ownRecording(req.user, rid)) return res.status(400).json({ error: 'Запись не найдена' });
   const room = db.updateRoom(req.params.id, req.body || {});
-  if (!room) return res.status(404).json({ error: 'Не найдено' });
   onRoomUpdated(room.id);
-  res.json(room);
+  res.json(roomView(room));
 });
 
 app.delete('/api/rooms/:id', requireAdmin, (req, res) => {
+  if (!ownRoom(req, res)) return;
   endMeeting(req.params.id, 'Встреча завершена организатором');
   db.deleteRoom(req.params.id);
+  lives.delete(req.params.id);
   res.json({ ok: true });
 });
 
@@ -143,12 +231,13 @@ const upload = multer({
   fileFilter: (req, file, cb) => cb(null, /^(video|audio)\//.test(file.mimetype)),
 });
 
-app.get('/api/recordings', requireAdmin, (req, res) => res.json(db.listRecordings()));
+app.get('/api/recordings', requireAdmin, (req, res) => res.json(db.listRecordings(req.user.id)));
 
 app.post('/api/recordings', requireAdmin, upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Нужен видеофайл' });
   const rec = db.addRecording({
     id: crypto.randomBytes(8).toString('hex'),
+    ownerId: req.user.id,
     title: String(req.body.title || req.file.originalname).trim().slice(0, 120) || 'Запись',
     file: req.file.filename,
     mime: req.file.mimetype,
@@ -183,13 +272,13 @@ function optimizeRecording(rec) {
 }
 
 app.patch('/api/recordings/:id', requireAdmin, (req, res) => {
-  const rec = db.updateRecording(req.params.id, req.body || {});
-  if (!rec) return res.status(404).json({ error: 'Не найдено' });
-  res.json(rec);
+  if (!ownRecording(req.user, req.params.id)) return res.status(404).json({ error: 'Не найдено' });
+  res.json(db.updateRecording(req.params.id, req.body || {}));
 });
 
 app.delete('/api/recordings/:id', requireAdmin, (req, res) => {
-  for (const room of db.listRooms()) {
+  if (!ownRecording(req.user, req.params.id)) return res.status(404).json({ error: 'Не найдено' });
+  for (const room of db.listRooms(req.user.id)) {
     const live = lives.get(room.id);
     if (live && live.play.recordingId === req.params.id) stopPlayback(room.id);
   }
@@ -197,8 +286,21 @@ app.delete('/api/recordings/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- Кастомные эмодзи ----------
-const STD_REACTIONS = ['👍', '❤️', '😂', '😮', '👏', '🎉', '🔥', '🙏'];
+// ---------- Эмодзи ----------
+// Нарисованный набор (public/emoji/pack/*.svg) + Apple-эмодзи + загруженные админом картинки
+const PACK_DIR = path.join(__dirname, 'public', 'emoji', 'pack');
+const PACK = fs.existsSync(PACK_DIR)
+  ? fs.readdirSync(PACK_DIR).filter((f) => f.endsWith('.svg')).sort().map((f) => f.slice(0, -4))
+  : [];
+const EMOJI_RE = /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator})[\p{Extended_Pictographic}\p{Emoji_Component}‍️⃣]*$/u;
+
+function validReaction(room, code) {
+  code = String(code || '');
+  if (code.startsWith('pack:')) return PACK.includes(code.slice(5));
+  if (code.startsWith('custom:')) return db.getEmoji(code.slice(7))?.ownerId === room.ownerId;
+  return code.length <= 16 && EMOJI_RE.test(code);
+}
+
 const emojiUpload = multer({
   storage: upload.storage,
   limits: { fileSize: 2 * 1024 * 1024 },
@@ -206,25 +308,59 @@ const emojiUpload = multer({
 });
 
 app.get('/api/emojis', (req, res) => {
-  res.json({ standard: STD_REACTIONS, custom: db.listEmojis().map((e) => ({ id: e.id, name: e.name, url: `/media/${e.file}` })) });
+  let ownerId = null;
+  if (req.query.room) ownerId = db.getRoom(String(req.query.room))?.ownerId || null;
+  else ownerId = userFromCookie(req.headers.cookie)?.id || null;
+  res.json({
+    pack: PACK.map((name) => ({ name, url: `/emoji/pack/${name}.svg` })),
+    custom: ownerId ? db.listEmojis(ownerId).map((e) => ({ id: e.id, name: e.name, url: `/media/${e.file}` })) : [],
+  });
 });
 
 app.post('/api/emojis', requireAdmin, emojiUpload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Нужна картинка PNG, GIF, WebP или JPG до 2 МБ' });
   const name = String(req.body.name || '').toLowerCase().replace(/[^a-z0-9_а-яё-]/g, '').slice(0, 32);
-  if (!name || db.listEmojis().some((e) => e.name === name)) {
+  if (!name || PACK.includes(name) || db.listEmojis(req.user.id).some((e) => e.name === name)) {
     fs.rm(req.file.path, () => {});
     return res.status(400).json({ error: name ? 'Эмодзи с таким именем уже есть' : 'Укажите имя (буквы, цифры, _)' });
   }
-  const e = db.addEmoji({ id: crypto.randomBytes(6).toString('hex'), name, file: req.file.filename });
+  const e = db.addEmoji({ id: crypto.randomBytes(6).toString('hex'), ownerId: req.user.id, name, file: req.file.filename });
   io.emit('emojis-updated');
   res.json(e);
 });
 
 app.delete('/api/emojis/:id', requireAdmin, (req, res) => {
+  if (db.getEmoji(req.params.id)?.ownerId !== req.user.id) return res.status(404).json({ error: 'Не найдено' });
   db.deleteEmoji(req.params.id);
   io.emit('emojis-updated');
   res.json({ ok: true });
+});
+
+// Apple-эмодзи: сервер один раз скачивает картинку и дальше отдаёт её сам
+const APPLE_DIR = path.join(db.CACHE_DIR, 'apple');
+fs.mkdirSync(APPLE_DIR, { recursive: true });
+const appleInflight = new Map();
+app.get('/apple-emoji/:code.png', async (req, res) => {
+  const code = req.params.code.toLowerCase();
+  if (!/^[0-9a-f]{2,6}(-[0-9a-f]{2,6}){0,9}$/.test(code)) return res.sendStatus(404);
+  const file = path.join(APPLE_DIR, code + '.png');
+  const send = () => res.set('Cache-Control', 'public, max-age=2592000, immutable').sendFile(file);
+  if (fs.existsSync(file)) return send();
+  try {
+    if (!appleInflight.has(code)) {
+      appleInflight.set(code, (async () => {
+        const r = await fetch(APPLE_EMOJI_CDN + code + '.png', { signal: AbortSignal.timeout(10_000) });
+        if (!r.ok) throw new Error(String(r.status));
+        const buf = Buffer.from(await r.arrayBuffer());
+        fs.writeFileSync(file + '.tmp', buf);
+        fs.renameSync(file + '.tmp', file);
+      })().finally(() => appleInflight.delete(code)));
+    }
+    await appleInflight.get(code);
+    send();
+  } catch (e) {
+    res.sendStatus(404);
+  }
 });
 
 app.use('/media', express.static(db.UPLOAD_DIR, { maxAge: '1h', index: false }));
@@ -234,11 +370,42 @@ const pub = path.join(__dirname, 'public');
 app.use(express.static(pub, { index: false }));
 app.get('/', (req, res) => res.sendFile(path.join(pub, 'index.html')));
 app.get('/r/:id', (req, res) => res.sendFile(path.join(pub, 'room.html')));
-app.get('/admin', (req, res) => res.sendFile(path.join(pub, 'admin', isAdminCookie(req.headers.cookie) ? 'index.html' : 'login.html')));
+app.get('/admin', (req, res) => res.sendFile(path.join(pub, 'admin', userFromCookie(req.headers.cookie) ? 'index.html' : 'login.html')));
 app.get('/admin/room/:id', (req, res) => {
-  if (!isAdminCookie(req.headers.cookie)) return res.redirect('/admin');
+  if (!userFromCookie(req.headers.cookie)) return res.redirect('/admin');
   res.sendFile(path.join(pub, 'admin', 'room.html'));
 });
+
+// ---------- Расписание и повторы ----------
+const DAY = 24 * 3600 * 1000;
+const isWeekend = (t, tzOffset) => { const d = new Date(t - tzOffset * 60000).getUTCDay(); return d === 0 || d === 6; };
+
+// последний запуск, который уже наступил (или null)
+function lastOccurrence(pb, now) {
+  if (pb.startMode !== 'scheduled' || !pb.startAt) return null;
+  const base = Date.parse(pb.startAt);
+  if (now < base) return null;
+  if (pb.repeat === 'none') return base;
+  const step = pb.repeat === 'weekly' ? 7 * DAY : DAY;
+  let occ = base + Math.floor((now - base) / step) * step;
+  if (pb.repeat === 'weekdays') {
+    while (occ >= base && isWeekend(occ, pb.tzOffset)) occ -= DAY;
+    if (occ < base) return null;
+  }
+  return occ;
+}
+
+// ближайший будущий запуск (для показа в админке)
+function nextOccurrence(pb, now) {
+  if (pb.startMode !== 'scheduled' || !pb.startAt) return null;
+  const base = Date.parse(pb.startAt);
+  if (now < base) return new Date(base).toISOString();
+  if (pb.repeat === 'none') return null;
+  const step = pb.repeat === 'weekly' ? 7 * DAY : DAY;
+  let occ = base + (Math.floor((now - base) / step) + 1) * step;
+  if (pb.repeat === 'weekdays') while (isWeekend(occ, pb.tzOffset)) occ += DAY;
+  return new Date(occ).toISOString();
+}
 
 // ---------- Живое состояние комнат ----------
 // lives: roomId -> { participants: Map, waiting: Map, chat: [], play: {...}, timers }
@@ -316,6 +483,7 @@ function guestRoomInfo(room) {
     id: room.id,
     name: room.name,
     allowChat: room.settings.allowChat,
+    allowReactions: room.settings.allowReactions,
     presenter: {
       name: pb.presenterName,
       display: pb.display,
@@ -329,7 +497,7 @@ function adminState(roomId) {
   const room = db.getRoom(roomId);
   const live = getLive(roomId);
   return {
-    room,
+    room: roomView(room),
     waiting: [...live.waiting.values()].map((w) => ({ id: w.id, name: w.name, at: w.at })),
     participants: [...live.participants.values()].map((p) => publicParticipant(room, p)),
     playback: playbackPayload(roomId),
@@ -361,7 +529,8 @@ function scheduleEnd(roomId) {
 function startPlayback(roomId, recordingId, { startedAt = Date.now(), position = 0 } = {}) {
   const room = db.getRoom(roomId);
   const recId = recordingId || room?.playback.recordingId;
-  if (!room || !db.getRecording(recId)) return false;
+  const rec = db.getRecording(recId);
+  if (!room || !rec || rec.ownerId !== room.ownerId) return false;
   const live = getLive(roomId);
   clearTimeout(live.firstGuestTimer);
   live.play = { status: 'playing', recordingId: recId, position, startedAt };
@@ -436,6 +605,8 @@ function endMeeting(roomId, reason) {
   notifyAdmins(roomId);
 }
 
+const scheduleKey = (pb) => `${pb.startMode}|${pb.startAt}|${pb.repeat}|${pb.recordingId}`;
+
 function onRoomUpdated(roomId) {
   const room = db.getRoom(roomId);
   if (!room) return;
@@ -453,7 +624,8 @@ function onRoomUpdated(roomId) {
   }
   io.to(roomId).emit('room-updated', guestRoomInfo(room));
   io.to(roomId).emit('participants', [...live.participants.values()].map((p) => publicParticipant(room, p)));
-  if (room.playback.startMode === 'scheduled') live.autoStartedFor = null;
+  // изменили расписание — разрешаем запуск по новому времени
+  if (live.scheduleKey !== scheduleKey(room.playback)) live.autoStartedFor = null;
   notifyAdmins(roomId);
 }
 
@@ -463,22 +635,27 @@ function enforcePerms(room, p) {
   if (!perms.allowMic) p.mic = false;
 }
 
-// Автоматический запуск записи по расписанию
+// Автоматический запуск записи по расписанию (в т.ч. повторяющемуся)
 setInterval(() => {
   const now = Date.now();
   for (const room of db.listRooms()) {
     const pb = room.playback;
-    if (pb.startMode !== 'scheduled' || !pb.startAt || !pb.recordingId) continue;
-    const at = Date.parse(pb.startAt);
+    const occ = lastOccurrence(pb, now);
+    if (occ === null || !pb.recordingId) continue;
     const live = getLive(room.id);
-    if (now < at || live.autoStartedFor === pb.startAt) continue;
-    live.autoStartedFor = pb.startAt;
+    if (live.autoStartedFor === occ) continue;
+    live.autoStartedFor = occ;
+    live.scheduleKey = scheduleKey(pb);
     if (live.play.status === 'playing' || live.play.status === 'paused') continue;
     const rec = db.getRecording(pb.recordingId);
-    // Если сервер был перезапущен после времени старта — продолжаем «с того места, где должны быть»
+    // если сервер был перезапущен после времени старта — продолжаем «с того места, где должны быть»
     const maxLate = rec?.duration || 6 * 3600;
-    if ((now - at) / 1000 >= maxLate) continue;
-    startPlayback(room.id, pb.recordingId, { startedAt: at });
+    if ((now - occ) / 1000 >= maxLate) continue;
+    if (pb.repeat !== 'none' && live.chat.length) {
+      live.chat = [];
+      io.to(room.id).emit('chat-cleared');
+    }
+    startPlayback(room.id, pb.recordingId, { startedAt: occ });
   }
 }, 1000);
 
@@ -543,8 +720,16 @@ function removeParticipant(roomId, id) {
   notifyAdmins(roomId);
 }
 
+function pushChat(room, msg) {
+  const live = getLive(room.id);
+  live.chat.push(msg);
+  if (live.chat.length > 300) live.chat.shift();
+  io.to(room.id).emit('chat', msg);
+  notifyAdmins(room.id);
+}
+
 io.on('connection', (socket) => {
-  socket.data.admin = isAdminCookie(socket.handshake.headers.cookie);
+  socket.data.user = userFromCookie(socket.handshake.headers.cookie);
 
   const current = () => {
     const roomId = socket.data.roomId;
@@ -553,8 +738,6 @@ io.on('connection', (socket) => {
     return p ? { room, p, live: lives.get(roomId) } : null;
   };
 
-  socket.on('time', (cb) => typeof cb === 'function' && cb(Date.now()));
-
   socket.on('join', ({ roomId, name, asHost, hidden } = {}, cb = () => {}) => {
     const room = db.getRoom(roomId);
     if (!room) return cb({ error: 'Встреча не найдена' });
@@ -562,7 +745,7 @@ io.on('connection', (socket) => {
     name = String(name || '').trim().slice(0, 40);
     if (!name) return cb({ error: 'Введите имя' });
     if (asHost) {
-      if (!socket.data.admin) return cb({ error: 'Нет прав ведущего' });
+      if (socket.data.user?.id !== room.ownerId) return cb({ error: 'Нет прав ведущего в этой встрече' });
       admit(socket, roomId, { name, role: 'host', hidden });
       return cb({ status: 'joined' });
     }
@@ -610,23 +793,18 @@ io.on('connection', (socket) => {
     if (!c.room.settings.allowChat && c.p.role !== 'host') return;
     text = String(text || '').trim().slice(0, 1000);
     if (!text) return;
-    const msg = { id: crypto.randomBytes(6).toString('hex'), name: c.p.name, text, at: Date.now(), host: c.p.role === 'host' };
-    c.live.chat.push(msg);
-    if (c.live.chat.length > 300) c.live.chat.shift();
-    io.to(c.room.id).emit('chat', msg);
-    notifyAdmins(c.room.id);
+    pushChat(c.room, { id: crypto.randomBytes(6).toString('hex'), name: c.p.name, text, at: Date.now(), host: c.p.role === 'host' });
   });
 
   socket.on('reaction', (emoji) => {
     const c = current();
     if (!c || c.p.hidden) return;
+    if (!c.room.settings.allowReactions && c.p.role !== 'host') return;
     const now = Date.now();
     if (now - (socket.data.lastReaction || 0) < 400) return; // защита от спама
     socket.data.lastReaction = now;
-    emoji = String(emoji || '');
-    const ok = STD_REACTIONS.includes(emoji) || (emoji.startsWith('custom:') && db.getEmoji(emoji.slice(7)));
-    if (!ok) return;
-    io.to(c.room.id).emit('reaction', { from: socket.id, emoji });
+    if (!validReaction(c.room, emoji)) return;
+    io.to(c.room.id).emit('reaction', { from: socket.id, emoji: String(emoji) });
   });
 
   socket.on('leave', () => {
@@ -641,13 +819,14 @@ io.on('connection', (socket) => {
     if (socket.data.roomId) removeParticipant(socket.data.roomId, socket.id);
   });
 
-  // ----- Управление (только администратор) -----
+  // ----- Управление (только владелец встречи) -----
   const adminOn = (event, handler) => socket.on(event, (args = {}, cb) => {
-    if (!socket.data.admin) return typeof cb === 'function' && cb({ error: 'Нет доступа' });
+    const reply = typeof cb === 'function' ? cb : () => {};
     const room = db.getRoom(args.roomId);
-    if (!room) return typeof cb === 'function' && cb({ error: 'Комната не найдена' });
+    if (!room) return reply({ error: 'Комната не найдена' });
+    if (!socket.data.user || socket.data.user.id !== room.ownerId) return reply({ error: 'Нет доступа' });
     handler(room, args);
-    if (typeof cb === 'function') cb({ ok: true });
+    reply({ ok: true });
   });
 
   adminOn('admin:watch', (room) => {
@@ -693,6 +872,16 @@ io.on('connection', (socket) => {
     notifyAdmins(room.id);
   });
 
+  adminOn('admin:cams-off', (room) => {
+    for (const p of getLive(room.id).participants.values()) {
+      if (p.role === 'host' || !p.cam) continue;
+      p.cam = false;
+      io.to(p.id).emit('force-cam-off');
+      io.to(room.id).emit('peer-updated', publicParticipant(room, p));
+    }
+    notifyAdmins(room.id);
+  });
+
   adminOn('admin:lower-hands', (room) => {
     for (const p of getLive(room.id).participants.values()) {
       if (!p.hand) continue;
@@ -709,6 +898,7 @@ io.on('connection', (socket) => {
   });
 
   adminOn('admin:playback', (room, { action, recordingId, position }) => {
+    if (recordingId && db.getRecording(recordingId)?.ownerId !== room.ownerId) return;
     if (action === 'start') startPlayback(room.id, recordingId, { position: Math.max(0, Number(position) || 0) });
     else if (action === 'pause') pausePlayback(room.id);
     else if (action === 'resume') resumePlayback(room.id);
@@ -720,19 +910,13 @@ io.on('connection', (socket) => {
     text = String(text || '').trim().slice(0, 1000);
     if (!text) return;
     const name = String(as || '').trim().slice(0, 60) || 'Организатор';
-    const live = getLive(room.id);
-    const msg = { id: crypto.randomBytes(6).toString('hex'), name, text, at: Date.now(), host: true };
-    live.chat.push(msg);
-    if (live.chat.length > 300) live.chat.shift();
-    io.to(room.id).emit('chat', msg);
-    notifyAdmins(room.id);
+    pushChat(room, { id: crypto.randomBytes(6).toString('hex'), name, text, at: Date.now(), host: true });
   });
 
   // реакция от имени «виртуального ведущего» (над плиткой записи)
   adminOn('admin:reaction', (room, { emoji }) => {
-    emoji = String(emoji || '');
-    if (!STD_REACTIONS.includes(emoji) && !(emoji.startsWith('custom:') && db.getEmoji(emoji.slice(7)))) return;
-    io.to(room.id).emit('reaction', { from: '__presenter', emoji });
+    if (!validReaction(room, emoji)) return;
+    io.to(room.id).emit('reaction', { from: '__presenter', emoji: String(emoji) });
   });
 
   adminOn('admin:end', (room) => endMeeting(room.id, 'Встреча завершена организатором'));

@@ -4,109 +4,155 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Админ-панель</title>
+  <link rel="icon" href="/icons/video.svg">
   <link rel="stylesheet" href="/css/style.css">
 </head>
-<body>
-<div class="admin-layout">
-  <div class="admin-head">
-    <h1 class="grow">Админ-панель</h1>
-    <button class="btn" id="logout">Выйти</button>
-  </div>
-  <div class="tabs">
-    <button data-tab="rooms" class="active">Встречи</button>
-    <button data-tab="recordings">Записи</button>
-    <button data-tab="studio">Студия записи</button>
-    <button data-tab="emojis">Эмодзи</button>
-  </div>
-
-  <!-- Встречи -->
-  <section id="tab-rooms" class="stack">
-    <form class="card row" id="newRoom">
-      <input id="newRoomName" class="grow" style="width:auto" placeholder="Название новой встречи" maxlength="100">
-      <button class="btn primary">+ Создать встречу</button>
-    </form>
-    <div class="card" style="overflow-x:auto">
-      <table class="table">
-        <thead><tr><th>Название</th><th>Код</th><th>Сейчас</th><th>Запись</th><th></th></tr></thead>
-        <tbody id="roomsBody"></tbody>
-      </table>
-      <div class="muted" id="roomsEmpty">Встреч пока нет — создайте первую.</div>
+<body class="glow">
+<div class="app">
+  <nav class="sidebar">
+    <div class="logo"><span class="mark"><i data-ic="video"></i></span>Встречи</div>
+    <button class="nav-item" data-tab="rooms"><i data-ic="layout-grid"></i>Встречи</button>
+    <button class="nav-item" data-tab="recordings"><i data-ic="film"></i>Записи</button>
+    <button class="nav-item" data-tab="studio"><i data-ic="circle-dot"></i>Студия записи</button>
+    <button class="nav-item" data-tab="emojis"><i data-ic="smile"></i>Эмодзи</button>
+    <button class="nav-item" data-tab="defaults"><i data-ic="sliders-horizontal"></i>По умолчанию</button>
+    <button class="nav-item hidden" data-tab="admins" id="navAdmins"><i data-ic="user-round-cog"></i>Админы</button>
+    <div class="me">
+      <div id="meAva"></div>
+      <div class="who grow"><div class="nm" id="meName"></div><div class="small muted" id="meRole"></div></div>
+      <button class="btn icon ghost" id="logout" title="Выйти"><i data-ic="log-out"></i></button>
     </div>
-  </section>
+  </nav>
 
-  <!-- Записи -->
-  <section id="tab-recordings" class="stack hidden">
-    <form class="card stack" id="uploadForm">
-      <h3>Загрузить видео</h3>
-      <div class="muted small">Подойдут MP4 (H.264/AAC) и WebM — они воспроизводятся во всех браузерах. Звук берётся из самого видео.</div>
-      <div class="row">
-        <input type="file" id="upFile" accept="video/*" class="grow" style="width:auto">
-        <input id="upTitle" placeholder="Название (необязательно)" class="grow" style="width:auto">
-        <button class="btn primary" id="upBtn">Загрузить</button>
+  <main class="main-area">
+    <!-- Встречи -->
+    <section id="tab-rooms">
+      <div class="page-head">
+        <div class="grow"><h1>Встречи</h1><div class="sub">Создавайте комнаты, приглашайте людей и запускайте записи</div></div>
+        <form class="row" id="newRoom">
+          <input id="newRoomName" style="width:260px" placeholder="Название новой встречи" maxlength="100">
+          <button class="btn primary"><i data-ic="plus"></i>Создать</button>
+        </form>
       </div>
-      <div class="progress hidden" id="upProg"><div></div></div>
-      <div class="small muted" id="upInfo"></div>
-    </form>
-    <div class="card" style="overflow-x:auto">
-      <table class="table">
-        <thead><tr><th>Название</th><th>Длительность</th><th>Размер</th><th>Загружено</th><th></th></tr></thead>
-        <tbody id="recBody"></tbody>
-      </table>
-      <div class="muted" id="recEmpty">Записей пока нет.</div>
-    </div>
-    <div class="card hidden" id="previewCard">
-      <div class="row" style="margin-bottom:10px"><h3 class="grow" id="previewTitle" style="margin:0"></h3><button class="btn sm" id="previewClose">Закрыть</button></div>
-      <video id="previewVideo" class="pb-preview" controls playsinline></video>
-    </div>
-  </section>
+      <div class="grid-3" id="roomsGrid"></div>
+      <div class="card empty hidden" id="roomsEmpty"><i data-ic="video"></i><div>Встреч пока нет — создайте первую.<br><span class="small">Новая встреча получит настройки из раздела «По умолчанию».</span></div></div>
+    </section>
 
-  <!-- Студия -->
-  <section id="tab-studio" class="hidden">
-    <div class="admin-grid">
-      <div class="card stack">
-        <h3>Записать новое видео прямо здесь</h3>
-        <div class="muted small">Запишите своё выступление с камеры или демонстрацию экрана со звуком микрофона — запись сразу сохранится в разделе «Записи».</div>
-        <div class="radio-group">
-          <label><input type="radio" name="src" value="camera" checked> Камера + микрофон</label>
-          <label><input type="radio" name="src" value="screen"> Экран + микрофон</label>
-          <label><input type="radio" name="src" value="screen-cam"> Экран + камера в углу + микрофон</label>
+    <!-- Записи -->
+    <section id="tab-recordings" class="hidden">
+      <div class="page-head"><div class="grow"><h1>Записи</h1><div class="sub">Видео, которые можно показывать на встречах как живой эфир</div></div></div>
+      <div class="card stack" style="margin-bottom:18px">
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="upFile" accept="video/*">
+          <i data-ic="upload" class="xl"></i>
+          <div><b>Перетащите видео сюда</b> или нажмите, чтобы выбрать</div>
+          <div class="small">Лучше всего MP4 (H.264 + AAC) — играет везде, включая iPhone. Звук берётся из самого видео.</div>
+        </label>
+        <div class="row hidden" id="upRow">
+          <input id="upTitle" class="grow" placeholder="Название записи">
+          <button class="btn primary" id="upBtn"><i data-ic="upload"></i>Загрузить</button>
         </div>
-        <input id="studioTitle" placeholder="Название записи" maxlength="120">
-        <div class="row">
-          <button class="btn" id="stPrepare">Включить камеру/экран</button>
-          <button class="btn danger" id="stRec" disabled>● Начать запись</button>
-          <button class="btn" id="stStop" disabled>■ Стоп</button>
-          <span class="muted" id="stTime"></span>
+        <div class="progress hidden" id="upProg"><div></div></div>
+        <div class="small muted" id="upInfo"></div>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <table class="table">
+          <thead><tr><th>Название</th><th>Длительность</th><th>Размер</th><th>Загружено</th><th></th></tr></thead>
+          <tbody id="recBody"></tbody>
+        </table>
+        <div class="empty hidden" id="recEmpty"><i data-ic="film"></i><div>Записей пока нет</div></div>
+      </div>
+      <div class="card hidden" id="previewCard" style="margin-top:18px">
+        <div class="row between" style="margin-bottom:12px"><h3 id="previewTitle" style="margin:0"></h3><button class="btn sm" id="previewClose"><i data-ic="x" class="sm"></i>Закрыть</button></div>
+        <video id="previewVideo" class="pb-preview" controls playsinline></video>
+      </div>
+    </section>
+
+    <!-- Студия -->
+    <section id="tab-studio" class="hidden">
+      <div class="page-head"><div class="grow"><h1>Студия записи</h1><div class="sub">Запишите выступление прямо в браузере — оно сразу появится в «Записях»</div></div></div>
+      <div class="grid-2">
+        <div class="card stack">
+          <div class="choice">
+            <label><input type="radio" name="src" value="camera" checked><span><b>Камера + микрофон</b><span class="d">Обычное выступление</span></span></label>
+            <label><input type="radio" name="src" value="screen"><span><b>Экран + микрофон</b><span class="d">Презентация или демонстрация</span></span></label>
+            <label><input type="radio" name="src" value="screen-cam"><span><b>Экран + камера в углу</b><span class="d">Как в настоящем вебинаре</span></span></label>
+          </div>
+          <input id="studioTitle" placeholder="Название записи" maxlength="120">
+          <div class="row">
+            <button class="btn" id="stPrepare"><i data-ic="camera"></i>Подготовить</button>
+            <button class="btn danger solid" id="stRec" disabled><i data-ic="circle-dot"></i>Запись</button>
+            <button class="btn" id="stStop" disabled><i data-ic="square"></i>Стоп</button>
+            <span class="badge live hidden" id="stTime"></span>
+          </div>
+          <div class="progress hidden" id="stProg"><div></div></div>
+          <div class="small muted" id="stInfo"></div>
         </div>
-        <div class="progress hidden" id="stProg"><div></div></div>
-        <div class="small muted" id="stInfo"></div>
+        <div class="card"><video id="stPreview" class="pb-preview" autoplay playsinline muted></video></div>
+      </div>
+    </section>
+
+    <!-- Эмодзи -->
+    <section id="tab-emojis" class="hidden">
+      <div class="page-head"><div class="grow"><h1>Эмодзи</h1><div class="sub">Реакции во встречах: Apple-эмодзи, наш набор стикеров и ваши картинки</div></div></div>
+      <div class="card stack" style="margin-bottom:18px">
+        <h3><i data-ic="plus"></i>Добавить свой эмодзи</h3>
+        <div class="muted small">PNG, GIF (можно анимированный), WebP или JPG до 2 МБ, лучше квадратный с прозрачным фоном. В чате вставляется как <code>:имя:</code>. Ваши эмодзи видны только на ваших встречах.</div>
+        <form class="row" id="emojiForm">
+          <input type="file" id="emFile" accept="image/png,image/gif,image/webp,image/jpeg" class="grow">
+          <input id="emName" placeholder="имя, например fire_cat" maxlength="32" style="width:220px">
+          <button class="btn primary"><i data-ic="plus"></i>Добавить</button>
+        </form>
+      </div>
+      <div class="card" style="margin-bottom:18px">
+        <h3>Ваши эмодзи</h3>
+        <div class="emoji-grid" id="emojiGrid"></div>
+        <div class="muted small" id="emojiEmpty">Пока нет — загрузите первый.</div>
       </div>
       <div class="card">
-        <video id="stPreview" class="pb-preview" autoplay playsinline muted></video>
+        <h3><i data-ic="sparkles"></i>Набор стикеров</h3>
+        <div class="muted small" style="margin-bottom:12px">Доступен всем на любой встрече.</div>
+        <div class="emoji-grid" id="packGrid"></div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Эмодзи -->
-  <section id="tab-emojis" class="stack hidden">
-    <form class="card stack" id="emojiForm">
-      <h3>Добавить свой эмодзи</h3>
-      <div class="muted small">Картинка PNG, GIF (можно анимированную), WebP или JPG до 2 МБ, лучше квадратная с прозрачным фоном.
-        Участники смогут отправлять её как реакцию и вставлять в чат как <code>:имя:</code>.</div>
-      <div class="row">
-        <input type="file" id="emFile" accept="image/png,image/gif,image/webp,image/jpeg" class="grow" style="width:auto">
-        <input id="emName" placeholder="имя, например fire_cat" maxlength="32" class="grow" style="width:auto">
-        <button class="btn primary">Добавить</button>
+    <!-- По умолчанию -->
+    <section id="tab-defaults" class="hidden">
+      <div class="page-head"><div class="grow"><h1>Настройки по умолчанию</h1><div class="sub">С этими настройками создаётся каждая новая встреча</div></div>
+        <button class="btn primary" id="defSave"><i data-ic="check"></i>Сохранить</button></div>
+      <div class="grid-2">
+        <div class="card"><h3><i data-ic="shield-check"></i>Доступ</h3><div id="defSwitches"></div></div>
+        <div class="card stack"><h3><i data-ic="film"></i>Показ записи</h3><div id="defPlayback"></div></div>
       </div>
-    </form>
-    <div class="card">
-      <div class="emoji-grid" id="emojiGrid"></div>
-      <div class="muted" id="emojiEmpty">Своих эмодзи пока нет.</div>
-    </div>
-  </section>
+    </section>
+
+    <!-- Админы -->
+    <section id="tab-admins" class="hidden">
+      <div class="page-head"><div class="grow"><h1>Администраторы</h1><div class="sub">У каждого админа свои встречи, записи, эмодзи и настройки — они не видят чужие</div></div></div>
+      <div class="card stack" style="margin-bottom:18px">
+        <h3><i data-ic="user-plus"></i>Новый администратор</h3>
+        <form class="row" id="userForm">
+          <input id="uName" placeholder="Имя (например, Иван)" maxlength="60" class="grow">
+          <input id="uLogin" placeholder="Логин" maxlength="32" style="width:180px" autocomplete="off">
+          <input id="uPass" placeholder="Пароль (от 6 символов)" style="width:220px" autocomplete="new-password">
+          <button class="btn primary"><i data-ic="plus"></i>Создать</button>
+        </form>
+        <div class="small muted">Админ входит по адресу <code id="adminUrl"></code> со своим логином и паролем.</div>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <table class="table">
+          <thead><tr><th>Админ</th><th>Логин</th><th>Встреч</th><th>Записей</th><th>Создан</th><th></th></tr></thead>
+          <tbody id="usersBody"></tbody>
+        </table>
+        <div class="empty hidden" id="usersEmpty"><i data-ic="users"></i><div>Других админов пока нет</div></div>
+      </div>
+    </section>
+  </main>
 </div>
 
+<script src="/js/emoji-data.js"></script>
 <script src="/js/common.js"></script>
+<script src="/js/playback-form.js"></script>
 <script src="/js/admin.js"></script>
 </body>
 </html>

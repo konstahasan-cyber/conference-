@@ -4,15 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Вход в админ-панель</title>
+  <link rel="icon" href="/icons/video.svg">
   <link rel="stylesheet" href="/css/style.css">
 </head>
-<body>
+<body class="glow">
 <div class="center-page">
-  <form class="card stack" style="max-width:380px;width:100%" id="f">
-    <h1>Админ-панель</h1>
+  <form class="card glass stack" style="max-width:400px;width:100%;padding:30px" id="f">
+    <div class="logo"><span class="mark"><i data-ic="video"></i></span>Встречи</div>
+    <div><h2 style="margin:0">Вход в админ-панель</h2><div class="muted small">Для организаторов встреч</div></div>
+    <label class="field"><span>Логин</span><input id="login" value="admin" autocomplete="username" autocapitalize="off"></label>
     <label class="field"><span>Пароль</span><input type="password" id="pw" autofocus autocomplete="current-password"></label>
-    <button class="btn primary" style="width:100%">Войти</button>
-    <div class="small" id="err" style="color:var(--danger)"></div>
+    <button class="btn primary lg block"><i data-ic="log-in"></i>Войти</button>
+    <div class="small" id="err" style="color:#ff8a95"></div>
   </form>
 </div>
 <script src="/js/common.js"></script>
@@ -20,7 +23,7 @@
 $('#f').onsubmit = async (e) => {
   e.preventDefault();
   try {
-    await api('/api/login', { method: 'POST', body: { password: $('#pw').value } });
+    await api('/api/login', { method: 'POST', body: { login: $('#login').value, password: $('#pw').value } });
     location.reload();
   } catch (err) { $('#err').textContent = err.message; }
 };

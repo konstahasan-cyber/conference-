@@ -1,45 +1,62 @@
-// Админ-панель: встречи, записи, студия
-const tabs = ['rooms', 'recordings', 'studio', 'emojis'];
-function openTab(name) {
-  $$('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
-  tabs.forEach((t) => $(`#tab-${t}`).classList.toggle('hidden', t !== name));
-  location.hash = name;
-  if (name === 'rooms') loadRooms();
-  if (name === 'recordings') loadRecordings();
-  if (name === 'emojis') loadEmojiTab();
-}
-$$('.tabs button').forEach((b) => (b.onclick = () => openTab(b.dataset.tab)));
-$('#logout').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
-
+// Админ-панель: встречи, записи, студия, эмодзи, настройки по умолчанию, админы
+const tabs = ['rooms', 'recordings', 'studio', 'emojis', 'defaults', 'admins'];
+let me = null;
 let recordings = [];
+
+function openTab(name) {
+  if (name === 'admins' && me?.role !== 'owner') name = 'rooms';
+  $$('.nav-item[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  tabs.forEach((t) => $(`#tab-${t}`).classList.toggle('hidden', t !== name));
+  history.replaceState(null, '', '#' + name);
+  ({ rooms: loadRooms, recordings: loadRecordings, emojis: loadEmojiTab, defaults: loadDefaults, admins: loadUsers }[name] || (() => {}))();
+}
+$$('.nav-item[data-tab]').forEach((b) => (b.onclick = () => openTab(b.dataset.tab)));
+$('#logout').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
 
 // ---------- Встречи ----------
 async function loadRooms() {
   const [rooms, recs] = await Promise.all([api('/api/rooms'), api('/api/recordings')]);
   recordings = recs;
   $('#roomsEmpty').classList.toggle('hidden', rooms.length > 0);
-  $('#roomsBody').innerHTML = rooms.map((r) => {
+  $('#roomsGrid').innerHTML = rooms.map((r) => {
     const rec = recordings.find((x) => x.id === r.playback.recordingId);
-    const pbState = { playing: '<span class="badge live">идёт</span>', paused: '<span class="badge warn">пауза</span>', ended: '<span class="badge">закончилась</span>' }[r.live.playback] || '';
-    const mode = { manual: 'вручную', scheduled: r.playback.startAt ? 'в ' + new Date(r.playback.startAt).toLocaleString('ru-RU') : 'по расписанию', firstGuest: `через ${r.playback.delaySec} с после входа` }[r.playback.startMode];
-    return `<tr>
-      <td><b>${esc(r.name)}</b></td>
-      <td><code>${esc(r.id)}</code></td>
-      <td>👥 ${r.live.participants} ${r.live.waiting ? `<span class="badge warn">ждут: ${r.live.waiting}</span>` : ''}</td>
-      <td class="small">${rec ? `${esc(rec.title)} ${pbState}<div class="muted">старт: ${mode}</div>` : '<span class="muted">—</span>'}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <a class="btn sm primary" href="/admin/room/${encodeURIComponent(r.id)}">Управление</a>
-        <button class="btn sm" data-copy="${esc(r.id)}">Скопировать ссылку</button>
-        <button class="btn sm danger" data-del="${esc(r.id)}">Удалить</button>
-      </td></tr>`;
+    const pbState = { playing: '<span class="badge live">в эфире</span>', paused: '<span class="badge warn">пауза</span>', ended: '<span class="badge">закончилась</span>' }[r.live.playback] || '';
+    const lock = r.settings.locked ? `<span class="badge warn">${ic('lock', 'sm')} закрыта</span>` : r.settings.waitingRoom ? `<span class="badge">${ic('door-closed', 'sm')} зал ожидания</span>` : `<span class="badge">${ic('door-open', 'sm')} свободный вход</span>`;
+    return `<div class="card room-card">
+      <div class="top">
+        <div class="ava">${ic('video', 'lg')}</div>
+        <div class="grow"><div class="title">${esc(r.name)}</div><div class="small muted mono">${esc(r.id)}</div></div>
+        ${pbState}
+      </div>
+      <div class="meta">
+        <span class="badge ${r.live.participants ? 'ok' : ''}">${ic('users', 'sm')} ${r.live.participants}</span>
+        ${r.live.waiting ? `<span class="badge warn">${ic('clock', 'sm')} ждут: ${r.live.waiting}</span>` : ''}
+        ${lock}
+        ${r.playback.repeat !== 'none' && r.playback.startMode === 'scheduled' ? `<span class="badge accent">${ic('repeat', 'sm')} повтор</span>` : ''}
+      </div>
+      <div class="small muted">${rec ? `${ic('film', 'sm')} ${esc(rec.title)} — ${scheduleText(r.playback, r.nextStart)}` : 'Запись не выбрана'}</div>
+      <div class="actions">
+        <a class="btn sm primary" href="/admin/room/${encodeURIComponent(r.id)}">${ic('sliders-horizontal', 'sm')} Пульт</a>
+        <a class="btn sm" href="/r/${encodeURIComponent(r.id)}" target="_blank">${ic('log-in', 'sm')} Войти</a>
+        <a class="btn sm" href="/r/${encodeURIComponent(r.id)}?observer=1" target="_blank" title="Войти невидимо — участники вас не увидят">${ic('eye-off', 'sm')}</a>
+        <button class="btn sm" data-copy="${esc(r.id)}" title="Скопировать ссылку">${ic('link', 'sm')}</button>
+        <button class="btn sm" data-dup="${esc(r.id)}" title="Дублировать с теми же настройками">${ic('copy-plus', 'sm')}</button>
+        <button class="btn sm danger" data-del="${esc(r.id)}" title="Удалить">${ic('trash-2', 'sm')}</button>
+      </div></div>`;
   }).join('');
 }
 
-$('#roomsBody').onclick = async (e) => {
+$('#roomsGrid').onclick = async (e) => {
   const copy = e.target.closest('[data-copy]');
   if (copy) {
     await navigator.clipboard.writeText(`${location.origin}/r/${copy.dataset.copy}`).catch(() => {});
     toast('Ссылка скопирована');
+  }
+  const dup = e.target.closest('[data-dup]');
+  if (dup) {
+    await api(`/api/rooms/${dup.dataset.dup}/duplicate`, { method: 'POST' });
+    toast('Встреча продублирована');
+    loadRooms();
   }
   const del = e.target.closest('[data-del]');
   if (del && confirm('Удалить встречу? Все участники будут отключены.')) {
@@ -66,14 +83,14 @@ async function loadRecordings() {
   recordings = await api('/api/recordings');
   $('#recEmpty').classList.toggle('hidden', recordings.length > 0);
   $('#recBody').innerHTML = recordings.slice().reverse().map((r) => `<tr>
-    <td><b>${esc(r.title)}</b></td>
+    <td><div class="row nowrap">${ic('film', 'sm')}<b>${esc(r.title)}</b></div></td>
     <td>${r.duration ? fmtTime(r.duration) : '<span class="muted">?</span>'}</td>
     <td>${fmtSize(r.size)}</td>
-    <td class="small muted">${new Date(r.createdAt).toLocaleString('ru-RU')}</td>
+    <td class="small muted">${fmtDate(r.createdAt)}</td>
     <td style="text-align:right;white-space:nowrap">
-      <button class="btn sm" data-view="${r.id}">▶ Просмотр</button>
-      <button class="btn sm" data-rename="${r.id}">Переименовать</button>
-      <button class="btn sm danger" data-del="${r.id}">Удалить</button>
+      <button class="btn sm" data-view="${r.id}">${ic('play', 'sm')} Смотреть</button>
+      <button class="btn sm icon" data-rename="${r.id}" title="Переименовать">${ic('pencil', 'sm')}</button>
+      <button class="btn sm icon danger" data-del="${r.id}" title="Удалить">${ic('trash-2', 'sm')}</button>
     </td></tr>`).join('');
 }
 
@@ -92,6 +109,7 @@ $('#recBody').onclick = async (e) => {
       const d = $('#previewVideo').duration;
       if (!rec.duration && isFinite(d) && d > 0) api(`/api/recordings/${rec.id}`, { method: 'PATCH', body: { duration: d } }).then(loadRecordings);
     };
+    $('#previewCard').scrollIntoView({ behavior: 'smooth' });
   } else if (b.dataset.rename) {
     const title = prompt('Новое название', rec.title);
     if (title) { await api(`/api/recordings/${rec.id}`, { method: 'PATCH', body: { title } }); loadRecordings(); }
@@ -137,16 +155,28 @@ function uploadRecording(blob, filename, title, duration, progEl, infoEl) {
   });
 }
 
-$('#uploadForm').onsubmit = async (e) => {
-  e.preventDefault();
-  const file = $('#upFile').files[0];
-  if (!file) return toast('Выберите видеофайл');
+let pickedFile = null;
+function pickFile(file) {
+  if (!file) return;
+  if (!/^(video|audio)\//.test(file.type)) return toast('Нужен видеофайл');
+  pickedFile = file;
+  $('#upRow').classList.remove('hidden');
+  $('#upTitle').value = file.name.replace(/\.[^.]+$/, '');
+  $('#upInfo').textContent = `${file.name} · ${fmtSize(file.size)}`;
+}
+$('#upFile').onchange = () => pickFile($('#upFile').files[0]);
+const dz = $('#dropzone');
+dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
+dz.ondragleave = () => dz.classList.remove('over');
+dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); pickFile(e.dataTransfer.files[0]); };
+
+$('#upBtn').onclick = async () => {
+  if (!pickedFile) return toast('Выберите видеофайл');
   $('#upBtn').disabled = true;
   try {
-    const duration = await probeDuration(file);
-    const title = $('#upTitle').value.trim() || file.name.replace(/\.[^.]+$/, '');
-    await uploadRecording(file, file.name, title, duration, $('#upProg'), $('#upInfo'));
-    $('#upFile').value = ''; $('#upTitle').value = '';
+    const duration = await probeDuration(pickedFile);
+    await uploadRecording(pickedFile, pickedFile.name, $('#upTitle').value.trim() || pickedFile.name, duration, $('#upProg'), $('#upInfo'));
+    pickedFile = null; $('#upFile').value = ''; $('#upRow').classList.add('hidden');
     loadRecordings();
   } catch (err) {
     toast('Не удалось загрузить файл');
@@ -168,6 +198,7 @@ $('#stPrepare').onclick = async () => {
   const mode = $('input[name=src]:checked').value;
   try {
     const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    studio.extra.push(mic);
     let videoTrack;
     if (mode === 'camera') {
       const cam = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } });
@@ -192,7 +223,10 @@ $('#stPrepare').onclick = async () => {
           const r = Math.min(1280 / (vScr.videoWidth || 1280), 720 / (vScr.videoHeight || 720));
           const w = (vScr.videoWidth || 1280) * r, h = (vScr.videoHeight || 720) * r;
           ctx.drawImage(vScr, (1280 - w) / 2, (720 - h) / 2, w, h);
-          ctx.drawImage(vCam, 1280 - 260, 720 - 195, 240, 180);
+          ctx.save();
+          ctx.beginPath(); ctx.roundRect(1280 - 268, 720 - 203, 248, 183, 16); ctx.clip();
+          ctx.drawImage(vCam, 1280 - 268, 720 - 203, 248, 183);
+          ctx.restore();
           studio.raf = requestAnimationFrame(draw);
         };
         draw();
@@ -200,12 +234,11 @@ $('#stPrepare').onclick = async () => {
       }
     }
     studio.stream = new MediaStream([videoTrack, mic.getAudioTracks()[0]]);
-    studio.extra.push(mic);
     $('#stPreview').srcObject = new MediaStream([videoTrack]);
     $('#stRec').disabled = false;
     $('#stInfo').textContent = 'Готово к записи.';
   } catch (e) {
-    toast('Нет доступа к камере/экрану/микрофону');
+    toast('Нет доступа к камере, экрану или микрофону');
   }
 };
 
@@ -235,7 +268,8 @@ $('#stRec').onclick = () => {
   };
   studio.recorder.start(1000);
   studio.started = Date.now();
-  studio.timer = setInterval(() => ($('#stTime').textContent = '● ' + fmtTime((Date.now() - studio.started) / 1000)), 500);
+  $('#stTime').classList.remove('hidden');
+  studio.timer = setInterval(() => ($('#stTime').textContent = fmtTime((Date.now() - studio.started) / 1000)), 500);
   $('#stRec').disabled = true; $('#stStop').disabled = false; $('#stPrepare').disabled = true;
   $('#stInfo').textContent = 'Идёт запись…';
 };
@@ -243,16 +277,17 @@ $('#stRec').onclick = () => {
 $('#stStop').onclick = () => {
   studio.recorder?.stop();
   $('#stStop').disabled = true; $('#stPrepare').disabled = false;
-  $('#stTime').textContent = '';
+  $('#stTime').classList.add('hidden');
 };
 
 // ---------- Эмодзи ----------
 async function loadEmojiTab() {
-  const { custom } = await loadEmojis();
+  const { custom, pack } = await loadEmojis();
   $('#emojiEmpty').classList.toggle('hidden', custom.length > 0);
   $('#emojiGrid').innerHTML = custom.map((e) => `<div class="emoji-card">
     <img src="${esc(e.url)}" alt=""><code>:${esc(e.name)}:</code>
-    <button class="btn sm danger" data-del="${e.id}">Удалить</button></div>`).join('');
+    <button class="btn sm danger" data-del="${e.id}">${ic('trash-2', 'sm')}</button></div>`).join('');
+  $('#packGrid').innerHTML = pack.map((e) => `<div class="emoji-card"><img src="${esc(e.url)}" alt=""><code>:${esc(e.name)}:</code></div>`).join('');
 }
 $('#emojiGrid').onclick = async (e) => {
   const b = e.target.closest('[data-del]');
@@ -279,4 +314,68 @@ $('#emojiForm').onsubmit = async (e) => {
   } catch (err) { toast(err.message); }
 };
 
-openTab(tabs.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'rooms');
+// ---------- По умолчанию ----------
+async function loadDefaults() {
+  const [d, recs] = await Promise.all([api('/api/defaults'), api('/api/recordings')]);
+  $('#defSwitches').innerHTML = switchesHtml(d.settings, 'data-dset');
+  renderPlaybackForm($('#defPlayback'), d.playback, recs);
+}
+$('#defSave').onclick = async () => {
+  const settings = {};
+  $$('[data-dset]').forEach((el) => (settings[el.dataset.dset] = el.checked));
+  const playback = readPlaybackForm($('#defPlayback'));
+  const err = validatePlayback(playback, { needRecording: false });
+  if (err) return toast(err);
+  try {
+    await api('/api/defaults', { method: 'PUT', body: { settings, playback } });
+    toast('Сохранено. Новые встречи будут создаваться с этими настройками');
+  } catch (e) { toast(e.message); }
+};
+
+// ---------- Админы ----------
+async function loadUsers() {
+  const users = await api('/api/users');
+  $('#adminUrl').textContent = `${location.origin}/admin`;
+  $('#usersEmpty').classList.toggle('hidden', users.length > 0);
+  $('#usersBody').innerHTML = users.map((u) => `<tr>
+    <td><div class="row nowrap">${avatarHtml(u.name)}<b>${esc(u.name)}</b></div></td>
+    <td class="mono">${esc(u.login)}</td><td>${u.rooms}</td><td>${u.recordings}</td>
+    <td class="small muted">${fmtDate(u.createdAt)}</td>
+    <td style="text-align:right;white-space:nowrap">
+      <button class="btn sm" data-pass="${u.id}">${ic('key-round', 'sm')} Пароль</button>
+      <button class="btn sm icon danger" data-del="${u.id}" title="Удалить">${ic('trash-2', 'sm')}</button></td></tr>`).join('');
+}
+$('#usersBody').onclick = async (e) => {
+  const pass = e.target.closest('[data-pass]');
+  if (pass) {
+    const password = prompt('Новый пароль (от 6 символов)');
+    if (!password) return;
+    try { await api(`/api/users/${pass.dataset.pass}`, { method: 'PATCH', body: { password } }); toast('Пароль изменён'); } catch (err) { toast(err.message); }
+  }
+  const del = e.target.closest('[data-del]');
+  if (del && confirm('Удалить администратора вместе со всеми его встречами и записями?')) {
+    await api(`/api/users/${del.dataset.del}`, { method: 'DELETE' });
+    loadUsers();
+  }
+};
+$('#userForm').onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    await api('/api/users', { method: 'POST', body: { name: $('#uName').value, login: $('#uLogin').value, password: $('#uPass').value } });
+    toast('Администратор создан');
+    e.target.reset();
+    loadUsers();
+  } catch (err) { toast(err.message); }
+};
+
+// ---------- Старт ----------
+(async () => {
+  me = (await api('/api/me')).user;
+  if (!me) return location.reload();
+  $('#meAva').innerHTML = avatarHtml(me.name);
+  $('#meName').textContent = me.name;
+  $('#meRole').textContent = me.role === 'owner' ? 'главный админ' : me.login;
+  $('#navAdmins').classList.toggle('hidden', me.role !== 'owner');
+  const h = location.hash.slice(1);
+  openTab(tabs.includes(h) ? h : 'rooms');
+})();
