@@ -61,6 +61,12 @@ CADDY_CONTAINER=""
 UPSTREAM_HOST=127.0.0.1
 if [ "$MODE" = external ]; then
   warn "Порты 80/443 уже заняты другим веб-сервером — использую его, ничего из существующего не удаляю."
+  # остаток прошлой неудачной установки: системный Caddy не смог запуститься из-за занятых портов.
+  # Отключаем его, иначе после перезагрузки он может перехватить порты у основного веб-сервера.
+  if systemctl is-enabled --quiet caddy 2>/dev/null && ! systemctl is-active --quiet caddy; then
+    systemctl disable --now caddy >/dev/null 2>&1 || true
+    echo "Отключён лишний системный Caddy от прошлой попытки установки."
+  fi
   if command -v docker >/dev/null; then
     CADDY_CONTAINER="$(docker ps --format '{{.Names}} {{.Image}}' | awk '$2 ~ /caddy/ {print $1; exit}')"
   fi
