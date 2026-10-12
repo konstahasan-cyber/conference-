@@ -210,8 +210,19 @@ user=$TURN_USER:$TURN_PASS
 realm=$DOMAIN
 no-cli
 no-multicast-peers
+no-loopback-peers
+# TLS/DTLS не нужны: 443 занят Caddy, поэтому TURN через TCP/443 (turns:) невозможен.
+# Слушаем 3478 по UDP и TCP (no-udp/no-tcp намеренно не задаём) — TCP выручает,
+# когда у участника UDP закрыт. listening-ip не задаём: по умолчанию все адреса.
 no-tls
 no-dtls
+stale-nonce=600
+# защита слабого сервера: ~3 Мбит/с на сессию и общий лимит сессий.
+# user-quota НЕ задаём: все участники ходят под одним логином TURN_USER, а в mesh
+# каждый создаёт до 2 сессий (UDP+TCP) на каждого собеседника — лимит на пользователя
+# оборвал бы связь уже при 4–5 участниках. По той же причине total-quota с запасом.
+total-quota=300
+max-bps=3000000
 # не пускаем TURN во внутренние сети сервера
 denied-peer-ip=0.0.0.0-0.255.255.255
 denied-peer-ip=10.0.0.0-10.255.255.255
