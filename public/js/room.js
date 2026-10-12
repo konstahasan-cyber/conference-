@@ -224,6 +224,7 @@ function show(view) {
 }
 
 function showEnd(title, text) {
+  if (REC.recorder) stopHostRecording();
   S.joined = false;
   for (const peer of S.peers.values()) peer.pc?.close();
   S.peers.clear();
@@ -249,6 +250,7 @@ socket.on('joined', ({ self, peers, room, playback, chat }) => {
   const host = S.role === 'host';
   $('#btnScreen').classList.toggle('hidden', !host || self.hidden);
   $('#btnManage').classList.toggle('hidden', !host);
+  $('#btnRec').classList.toggle('hidden', !host || self.hidden);
   $('#tabManage').classList.toggle('hidden', !host);
   $('#observerBadge').classList.toggle('hidden', !self.hidden);
   applyRoom(room);
@@ -532,10 +534,145 @@ $('#btnScreen').onclick = async () => {
 $('#btnHand').onclick = () => { S.hand = !S.hand; socket.emit('hand', S.hand); updateButtons(); };
 $('#btnSettings').onclick = () => openDevices();
 
-$('#btnLeave').onclick = () => {
+$('#btnLeave').onclick = async () => {
+  if (REC.recorder && !confirm('Идёт запись. Остановить её, сохранить и выйти?')) return;
+  if (REC.recorder) await stopHostRecording();
   socket.emit('leave');
-  showEnd('Вы покинули встречу', '');
+  showEnd('Вы покинули встречу', REC.uploading ? 'Запись загружается — не закрывайте страницу, пока не появится «Запись сохранена».' : '');
 };
+
+// ---------- Запись ведущего ----------
+// Пишется только своё: микрофон ведущего + камера или демонстрация экрана (экран с камерой в углу).
+// Участники, их звук и видео в запись не попадают.
+const REC = { recorder: null, parts: [], started: 0, uploading: false };
+
+function pickRecMime() {
+  const list = ['video/mp4;codecs=avc1.42E01F,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
+  return list.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+}
+
+function startHostRecording() {
+  if (!window.MediaRecorder) return toast('Этот браузер не умеет записывать — используйте Chrome, Edge или Firefox');
+  ensureAudioCtx();
+  const W = 1280, H = 720;
+  const canvas = Object.assign(document.createElement('canvas'), { width: W, height: H });
+  const ctx = canvas.getContext('2d');
+  const mkVideo = () => Object.assign(document.createElement('video'), { muted: true, playsInline: true, autoplay: true });
+  const vCam = mkVideo(), vScr = mkVideo();
+  const dest = audioCtx.createMediaStreamDestination();
+  const src = { cam: undefined, scr: undefined, mic: undefined, node: null };
+
+  const syncSources = () => {
+    if (src.cam !== S.local.video) { src.cam = S.local.video; vCam.srcObject = src.cam ? new MediaStream([src.cam]) : null; vCam.play().catch(() => {}); }
+    if (src.scr !== S.local.screen) { src.scr = S.local.screen; vScr.srcObject = src.scr ? new MediaStream([src.scr]) : null; vScr.play().catch(() => {}); }
+    if (src.mic !== S.local.audio) {
+      src.mic = S.local.audio;
+      src.node?.disconnect();
+      src.node = src.mic ? audioCtx.createMediaStreamSource(new MediaStream([src.mic])) : null;
+      src.node?.connect(dest);
+    }
+  };
+  const fit = (v, x, y, w, h, cover) => {
+    const vw = v.videoWidth, vh = v.videoHeight;
+    if (!vw || !vh) return;
+    const r = cover ? Math.max(w / vw, h / vh) : Math.min(w / vw, h / vh);
+    const dw = vw * r, dh = vh * r;
+    ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    ctx.drawImage(v, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+    ctx.restore();
+  };
+  const draw = () => {
+    syncSources();
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    if (src.scr) {
+      fit(vScr, 0, 0, W, H, false);
+      if (src.cam) {
+        ctx.save(); ctx.beginPath(); ctx.roundRect(W - 292, H - 182, 272, 162, 14); ctx.clip();
+        fit(vCam, W - 292, H - 182, 272, 162, true);
+        ctx.restore();
+      }
+    } else if (src.cam) {
+      fit(vCam, 0, 0, W, H, true);
+    } else {
+      // камера выключена — аватарка с именем, как в самой встрече
+      const name = S.self?.name || '';
+      const g = ctx.createLinearGradient(W / 2 - 90, H / 2 - 90, W / 2 + 90, H / 2 + 90);
+      g.addColorStop(0, '#8b5cf6'); g.addColorStop(1, '#3b82f6');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(W / 2, H / 2 - 20, 90, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '700 64px Inter, Arial, sans-serif'; ctx.fillText(initials(name), W / 2, H / 2 - 18);
+      ctx.font = '500 30px Inter, Arial, sans-serif'; ctx.fillStyle = '#c9cfdc'; ctx.fillText(name, W / 2, H / 2 + 110);
+    }
+  };
+  // таймер в воркере: не замедляется, когда вкладка в фоне (например, во время демонстрации другого окна)
+  const ticker = new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 33)'], { type: 'text/javascript' })));
+  ticker.onmessage = draw;
+  draw();
+
+  const stream = new MediaStream([canvas.captureStream(30).getVideoTracks()[0], dest.stream.getAudioTracks()[0]]);
+  const mimeType = pickRecMime();
+  const recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 2_500_000 } : undefined);
+  REC.parts = [];
+  recorder.ondataavailable = (e) => e.data.size && REC.parts.push(e.data);
+  REC.done = new Promise((resolve) => {
+    recorder.onstop = () => {
+      ticker.terminate();
+      src.node?.disconnect();
+      stream.getTracks().forEach((t) => t.stop());
+      const duration = (Date.now() - REC.started) / 1000;
+      const type = (recorder.mimeType || mimeType || 'video/webm').split(';')[0];
+      resolve({ blob: new Blob(REC.parts, { type }), duration, ext: type.includes('mp4') ? 'mp4' : 'webm' });
+    };
+  });
+  recorder.start(1000);
+  REC.recorder = recorder;
+  REC.started = Date.now();
+  REC.timer = setInterval(() => ($('#recTime').textContent = fmtTime((Date.now() - REC.started) / 1000)), 500);
+  $('#recBadge').classList.remove('hidden');
+  updateRecButton();
+  toast('Запись началась: пишутся только ваш голос и то, что вы показываете');
+}
+
+async function stopHostRecording() {
+  if (!REC.recorder) return;
+  REC.recorder.stop();
+  REC.recorder = null;
+  clearInterval(REC.timer);
+  $('#recBadge').classList.add('hidden');
+  updateRecButton();
+  const { blob, duration, ext } = await REC.done;
+  if (duration < 1 || !blob.size) return toast('Запись слишком короткая — не сохранена');
+  const title = `${S.room?.name || 'Встреча'} — ${new Date(REC.started).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
+  REC.uploading = true;
+  const fd = new FormData();
+  fd.append('title', title);
+  fd.append('duration', duration);
+  fd.append('file', blob, `meeting.${ext}`);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/recordings');
+  let last = 0;
+  xhr.upload.onprogress = (e) => {
+    const pct = e.lengthComputable ? Math.round((e.loaded / e.total) * 100) : 0;
+    if (pct - last >= 25) { last = pct; toast(`Сохраняю запись… ${pct}%`, 1500); }
+  };
+  xhr.onload = () => {
+    REC.uploading = false;
+    if (xhr.status === 200) {
+      toast('Запись сохранена в раздел «Записи»', 5000);
+      if (S.role === 'host') api('/api/recordings').then((r) => { S.recordings = r; renderManage(); }).catch(() => {});
+    } else toast('Не удалось сохранить запись', 6000);
+  };
+  xhr.onerror = () => { REC.uploading = false; toast('Ошибка сети — запись не сохранена', 6000); };
+  xhr.send(fd);
+}
+
+function updateRecButton() {
+  setCtrl($('#btnRec'), { icon: REC.recorder ? 'square' : 'circle-dot', text: REC.recorder ? 'Стоп запись' : 'Запись', off: !!REC.recorder });
+}
+$('#btnRec').onclick = () => (REC.recorder ? stopHostRecording() : startHostRecording());
+window.addEventListener('beforeunload', (e) => {
+  if (REC.recorder || REC.uploading) { e.preventDefault(); e.returnValue = ''; }
+});
 
 function openSide(which) {
   if (S.side === which) which = null;

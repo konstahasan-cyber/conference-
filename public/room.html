@@ -52,6 +52,7 @@
     <div class="logo"><span class="mark" style="width:30px;height:30px"><i data-ic="video" class="sm"></i></span></div>
     <div class="title grow" id="meetTitle"></div>
     <span class="badge hidden" id="observerBadge"><i data-ic="eye-off" class="sm"></i> невидимка</span>
+    <span class="badge live hidden" id="recBadge" title="Записываются только ваш микрофон и то, что вы показываете">Запись <span id="recTime">0:00</span></span>
     <span class="badge" id="peopleBadge"><i data-ic="users" class="sm"></i> <span id="peopleCount">1</span></span>
     <span class="clock" id="meetClock"></span>
   </div>
@@ -87,6 +88,7 @@
   <div class="bottombar">
     <button class="ctrl" id="btnMic"><span class="ib"><i data-ic="mic"></i></span><span class="t">Микрофон</span></button>
     <button class="ctrl" id="btnCam"><span class="ib"><i data-ic="video"></i></span><span class="t">Камера</span></button>
+    <button class="ctrl hidden" id="btnRec" title="Записать свой голос и камеру/экран — участники в запись не попадают"><span class="ib"><i data-ic="circle-dot"></i></span><span class="t">Запись</span></button>
     <button class="ctrl hidden" id="btnScreen"><span class="ib"><i data-ic="monitor-up"></i></span><span class="t">Экран</span></button>
     <button class="ctrl" id="btnReact"><span class="ib"><i data-ic="smile-plus"></i></span><span class="t">Реакции</span></button>
     <button class="ctrl" id="btnHand"><span class="ib"><i data-ic="hand"></i></span><span class="t">Рука</span></button>

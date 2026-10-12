@@ -249,23 +249,34 @@ app.post('/api/recordings', requireAdmin, upload.single('file'), (req, res) => {
   res.json(rec);
 });
 
-// Если на сервере установлен ffmpeg — пересобираем файл (без перекодирования),
-// чтобы в нём были индекс и длительность: тогда перемотка для опоздавших работает мгновенно.
+// Если на сервере есть ffmpeg — приводим запись к MP4 (H.264 + AAC), который играет везде, включая iPhone.
+// Подходящие файлы только пересобираются без перекодирования (добавляется индекс для быстрой перемотки),
+// остальные (WebM, VP9, Opus из браузерной записи) перекодируются в фоне. Пока идёт обработка, используется исходник.
 function optimizeRecording(rec) {
   const src = path.join(db.UPLOAD_DIR, rec.file);
-  const ext = path.extname(rec.file);
-  const tmp = src + '.tmp' + ext;
-  const args = ['-y', '-v', 'error', '-i', src, '-c', 'copy'];
-  if (ext === '.mp4' || ext === '.m4v' || ext === '.mov') args.push('-movflags', '+faststart');
-  args.push(tmp);
-  execFile('ffmpeg', args, { timeout: 30 * 60_000 }, (err) => {
-    if (err) { fs.rm(tmp, () => {}); return; }
-    fs.rename(tmp, src, () => {
-      execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', src], (e2, out) => {
-        const d = parseFloat(out);
+  execFile('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name', '-of', 'csv=p=0', src], (perr, out) => {
+    if (perr) return;
+    const streams = String(out).trim().split('\n').map((l) => l.split(','));
+    const vcodec = streams.find((x) => x[1] === 'video')?.[0];
+    const acodec = streams.find((x) => x[1] === 'audio')?.[0];
+    const compatible = (!vcodec || vcodec === 'h264') && (!acodec || acodec === 'aac' || acodec === 'mp3');
+    const outName = crypto.randomBytes(16).toString('hex') + '.mp4';
+    const dst = path.join(db.UPLOAD_DIR, outName);
+    const args = ['-y', '-v', 'error', '-i', src];
+    if (compatible) args.push('-c', 'copy');
+    else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
+    args.push('-movflags', '+faststart', dst);
+    // перекодирование — с низким приоритетом, чтобы не мешать встречам
+    const [cmd, cmdArgs] = compatible ? ['ffmpeg', args] : ['nice', ['-n', '15', 'ffmpeg', ...args]];
+    execFile(cmd, cmdArgs, { timeout: 6 * 3600_000 }, (err) => {
+      if (err || !db.getRecording(rec.id)) { fs.rm(dst, () => {}); return; }
+      execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', dst], (e2, dout) => {
+        const d = parseFloat(dout);
         let size = 0;
-        try { size = fs.statSync(src).size; } catch (e) {}
-        db.updateRecording(rec.id, { duration: !e2 && d > 0 ? d : undefined, size });
+        try { size = fs.statSync(dst).size; } catch (e) {}
+        db.updateRecording(rec.id, { file: outName, mime: 'video/mp4', duration: !e2 && d > 0 ? d : undefined, size });
+        // старый файл удаляем позже: его ещё могут досматривать участники идущей встречи
+        setTimeout(() => fs.rm(src, () => {}), 6 * 3600_000).unref();
       });
     });
   });
@@ -273,7 +284,8 @@ function optimizeRecording(rec) {
 
 app.patch('/api/recordings/:id', requireAdmin, (req, res) => {
   if (!ownRecording(req.user, req.params.id)) return res.status(404).json({ error: 'Не найдено' });
-  res.json(db.updateRecording(req.params.id, req.body || {}));
+  const { title, duration } = req.body || {};
+  res.json(db.updateRecording(req.params.id, { title, duration }));
 });
 
 app.delete('/api/recordings/:id', requireAdmin, (req, res) => {

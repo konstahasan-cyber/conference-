@@ -243,7 +243,7 @@ $('#stPrepare').onclick = async () => {
 };
 
 function pickMime() {
-  const list = ['video/mp4;codecs=avc1,mp4a', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  const list = ['video/mp4;codecs=avc1.42E01F,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
   return list.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
 }
 
