@@ -736,7 +736,21 @@ io.on('connection', (socket) => {
   adminOn('admin:end', (room) => endMeeting(room.id, 'Встреча завершена организатором'));
 });
 
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Порт ${PORT} уже занят — возможно, сервер уже запущен в другом окне.`);
+  } else {
+    console.error(err);
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
+  const url = `http://localhost:${PORT}/admin`;
   console.log(`Сервер запущен: http://localhost:${PORT}`);
-  console.log(`Админ-панель:   http://localhost:${PORT}/admin`);
+  console.log(`Админ-панель:   ${url}`);
+  if (process.env.OPEN_BROWSER) {
+    const cmd = process.platform === 'win32' ? `start "" "${url}"` : process.platform === 'darwin' ? `open "${url}"` : `xdg-open "${url}"`;
+    require('child_process').exec(cmd);
+  }
 });
