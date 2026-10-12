@@ -152,6 +152,9 @@ cd "$APP_DIR"
 npm ci --omit=dev --no-audit --no-fund
 mkdir -p "$DATA_DIR"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" "$DATA_DIR"
+# быстрые команды: video update / video-update, video logs и т.д.
+install -m 755 "$APP_DIR/deploy/video.sh" /usr/local/bin/video
+ln -sf /usr/local/bin/video /usr/local/bin/video-update
 
 # ---------- Настройки приложения ----------
 say "Сохраняю настройки в $ENV_FILE"
@@ -332,6 +335,6 @@ fi
 echo
 echo "  Настройки:  $ENV_FILE     Данные: $DATA_DIR"
 echo "  Логи:       journalctl -u conference -f"
-echo "  Обновить:   sudo bash $APP_DIR/deploy/install.sh"
+echo "  Обновить:   video-update      (все команды: video help)"
 echo "  Если у хостера есть свой файрвол — откройте порты 3478 (TCP+UDP) и 49160-49250 (UDP)."
 echo -e "\033[1;32m========================================================\033[0m"
