@@ -218,6 +218,15 @@ case "$cmd" in
   status)  systemctl status conference --no-pager -l | head -15 ;;
   check)   run_check ;;
   logs)    journalctl -u conference -f -n 50 ;;
+  diag)
+    # жалобы браузеров участников: не грузится видео, обрыв соединения, нет доступа к камере
+    echo "Проблемы у участников за последние ${2:-24} ч (новые внизу):"
+    journalctl -u conference --since "-${2:-24}h" --no-pager -o short-iso 2>/dev/null | grep 'DIAG' | sed 's/^\([^ ]*\) .*DIAG /\1 /' | tail -n 60 || true
+    echo
+    echo "Расшифровка: ice-failed — участники не соединились напрямую (проверьте TURN: video check);"
+    echo "playback-stall / playback-lag — запись зависла или сильно отстаёт у участника (слабый интернет); playback-error — браузер не смог открыть файл;"
+    echo "media-error — нет доступа к камере/микрофону на стороне участника."
+    ;;
   url)     echo "Сайт:         https://$(env_get PUBLIC_DOMAIN)"
            echo "Админ-панель: https://$(env_get PUBLIC_DOMAIN)/admin" ;;
   password)
@@ -238,6 +247,7 @@ case "$cmd" in
   video start       — запустить
   video status      — состояние
   video logs        — логи в реальном времени (выход: Ctrl+C)
+  video diag        — на что жаловались браузеры участников за сутки (video diag 3 — за 3 часа)
   video url         — показать адрес сайта и админки
   video password    — сменить пароль админки
   video check       — диагностика: сайт, TURN (coturn), порты, фаервол, диск

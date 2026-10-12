@@ -106,6 +106,18 @@ $('#preMic').onclick = async () => { ensureAudioCtx(); S.local.audio ? stopLocal
 $('#preSettings').onclick = () => openDevices();
 $$('input[name=hostMode]').forEach((r) => (r.onchange = () => { S.observer = $('input[name=hostMode][value=hidden]').checked; updatePrejoin(); }));
 
+// Сообщаем серверу о проблемах у участника — админ видит их командой «video diag»
+const diagSent = new Set();
+function report(kind, detail, once) {
+  if (once) { if (diagSent.has(once)) return; diagSent.add(once); }
+  try {
+    fetch('/api/diag', {
+      method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: roomId, name: S.self?.name || $('#nameInput')?.value || '', kind, detail: String(detail || '').slice(0, 300) }),
+    }).catch(() => {});
+  } catch (e) {}
+}
+
 function mediaError(kind, e) {
   const what = kind === 'video' ? 'камере' : 'микрофону';
   const map = {
@@ -138,6 +150,7 @@ async function startLocal(kind) {
   } catch (e) {
     console.warn(kind, e);
     toast(mediaError(kind, e), 6000);
+    report('media-error', `${kind}: ${e?.name || ''} ${e?.message || ''}`, `media-${kind}-${e?.name}`);
     return false;
   }
 }
@@ -499,6 +512,7 @@ function newPC(id) {
   peer.pc = pc;
   pc.onicecandidate = (e) => { if (e.candidate) socket.emit('signal', { to: id, data: { candidate: e.candidate } }); };
   pc.ontrack = (e) => {
+    e.track.addEventListener('mute', () => layout());
     peer.stream.getTracks().filter((t) => t.kind === e.track.kind).forEach((t) => peer.stream.removeTrack(t));
     peer.stream.addTrack(e.track);
     e.track.onunmute = () => {
@@ -514,6 +528,7 @@ function newPC(id) {
     const alive = () => S.peers.get(id) === peer && peer.pc === pc;
     if (st !== 'disconnected') { clearTimeout(peer.iceTimer); peer.iceTimer = null; }
     // если соединение оборвалось — инициатор переподключается
+    if (st === 'failed') report('ice-failed', `с «${peer.info?.name}», TURN ${S.iceServers.some((x) => String(x.urls).includes('turn:')) ? 'настроен' : 'не настроен'}`, `ice-${peer.info?.name}`);
     if (st === 'failed' && peer.initiate && alive()) setTimeout(() => alive() && callPeer(id), 1000);
     // «disconnected» дольше 8 секунд — тоже переподключаемся
     if (st === 'disconnected' && peer.initiate && !peer.iceTimer) {
@@ -954,11 +969,12 @@ function ensureTile(key) {
   return t;
 }
 
-function setTile(t, { name, label, cam, mic, hand, stream, mirror, muted, net }) {
+function setTile(t, { name, label, cam, mic, hand, stream, mirror, muted, net, netText }) {
   t.nameEl.textContent = label || name;
   t.micEl.innerHTML = mic ? '' : ic('mic-off', 'sm');
   t.handEl.classList.toggle('hidden', !hand);
   t.netEl.classList.toggle('hidden', !net);
+  if (net && t.netText !== (netText || 'связь')) { t.netText = netText || 'связь'; t.netEl.innerHTML = `${ic('triangle-alert', 'sm')} ${esc(t.netText)}`; }
   const sp = $('span', t.avatar);
   sp.textContent = initials(name);
   sp.style.background = avatarColor(name);
@@ -996,9 +1012,11 @@ function layout() {
     .sort((a, b) => (a.info.role === 'host' ? -1 : 0) - (b.info.role === 'host' ? -1 : 0));
   for (const p of sorted) {
     const t = ensureTile(p.info.id);
-    const hasVideo = p.info.cam && p.stream.getVideoTracks().some((tr) => tr.readyState === 'live');
+    // видео показываем только когда реально идут кадры — иначе была бы чёрная плитка
+    const hasVideo = p.info.cam && p.stream.getVideoTracks().some((tr) => tr.readyState === 'live' && !tr.muted);
     const net = ['failed', 'disconnected'].includes(p.pc?.connectionState);
-    setTile(t, { name: p.info.name, cam: hasVideo, mic: p.info.mic, hand: p.info.hand, stream: p.stream, net });
+    const waitingVideo = p.info.cam && !hasVideo && !net;
+    setTile(t, { name: p.info.name, cam: hasVideo, mic: p.info.mic, hand: p.info.hand, stream: p.stream, net: net || waitingVideo, netText: net ? 'связь' : 'видео загружается…' });
     keys.push(p.info.id);
   }
   // невидимые участники: плитку не показываем, но звук их микрофона не нужен — они без медиа
@@ -1082,9 +1100,52 @@ pbVideo.setAttribute('disableRemotePlayback', '');
 pbVideo.oncontextmenu = (e) => e.preventDefault();
 pbVideo.style.pointerEvents = 'none';
 pbVideo.addEventListener('error', () => {
+  report('playback-error', `код ${pbVideo.error?.code} ${pbVideo.error?.message || ''} ${pbVideo.src.split('/').pop()}`, `pberr-${pbVideo.src}`);
   const alt = S.playback?.altUrl && new URL(S.playback.altUrl, location.href).href;
   if (alt && pbVideo.src !== alt) { pbVideo.src = alt; pbVideo.load(); syncVideo(true); }
 });
+
+// Пока запись грузится — показываем «Загрузка…» вместо чёрного экрана
+const pbLoading = document.createElement('div');
+pbLoading.className = 'pb-loading hidden';
+pbLoading.innerHTML = '<div class="spinner"></div><span>Загрузка видео…</span>';
+let loadingTimer = null;
+function setPbLoading(on) {
+  clearTimeout(loadingTimer);
+  if (!on) { pbLoading.classList.add('hidden'); return; }
+  // короткие подгрузки не показываем, чтобы не мигало
+  loadingTimer = setTimeout(() => {
+    if (pbVideo.parentNode && pbVideo.parentNode !== pbLoading.parentNode) pbVideo.parentNode.appendChild(pbLoading);
+    pbLoading.classList.remove('hidden');
+  }, 700);
+}
+['waiting', 'stalled', 'loadstart', 'seeking'].forEach((ev) => pbVideo.addEventListener(ev, () => S.playback?.status === 'playing' && setPbLoading(true)));
+['playing', 'canplay', 'seeked', 'pause'].forEach((ev) => pbVideo.addEventListener(ev, () => { if (pbVideo.readyState >= 3 || ev === 'pause') setPbLoading(false); }));
+
+// Сторож: если запись «идёт», а картинка стоит дольше 12 с — перезагружаем видео (дважды — пробуем запасной файл)
+const watchdog = { last: -1, since: 0, retries: 0 };
+setInterval(() => {
+  const p = S.playback;
+  if (!S.joined || p?.status !== 'playing' || !pbVideo.src || expectedPos() >= (p.duration || Infinity)) { watchdog.since = 0; return; }
+  const now = performance.now();
+  // видео ползёт урывками и сильно отстаёт от эфира — у участника слабый интернет
+  const lag = expectedPos() - pbVideo.currentTime;
+  if (lag > 10 && (watchdog.lagReported == null || now - watchdog.lagReported > 60000)) {
+    watchdog.lagReported = now;
+    report('playback-lag', `отстаёт на ${lag.toFixed(0)} с от эфира, readyState ${pbVideo.readyState}, файл ${pbVideo.src.split('/').pop()}`);
+  }
+  if (Math.abs(pbVideo.currentTime - watchdog.last) > 0.05) { watchdog.last = pbVideo.currentTime; watchdog.since = now; watchdog.retries = 0; return; }
+  if (!watchdog.since) { watchdog.since = now; return; }
+  if (now - watchdog.since < 12000) return;
+  watchdog.since = now;
+  watchdog.retries++;
+  report('playback-stall', `стоит на ${pbVideo.currentTime.toFixed(1)} с, ждём ${expectedPos().toFixed(1)} с, readyState ${pbVideo.readyState}, networkState ${pbVideo.networkState}, попытка ${watchdog.retries}`);
+  const alt = p.altUrl && new URL(p.altUrl, location.href).href;
+  if (watchdog.retries >= 2 && alt && pbVideo.src !== alt) pbVideo.src = alt;
+  pbVideo.load();
+  pbVideo._waiting = false;
+  syncVideo(true);
+}, 2000);
 if (S.dev.spk) pbVideo.setSinkId?.(S.dev.spk).catch(() => {});
 
 function expectedPos() {

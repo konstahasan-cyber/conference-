@@ -262,6 +262,24 @@ app.post('/api/recordings', requireAdmin, upload.single('file'), (req, res) => {
 // Подходящие файлы только пересобираются без перекодирования (добавляется индекс для быстрой перемотки),
 // остальные (WebM, VP9, Opus из браузерной записи) перекодируются в фоне. Пока идёт обработка, используется исходник.
 function optimizeRecording(rec) {
+  const ext = path.extname(rec.file).toLowerCase();
+  if (ext !== '.webm' && ext !== '.mkv') return transcodeRecording(rec);
+  // Шаг 1 (секунды): записи из браузера приходят без индекса — опоздавшим браузер перематывает такой файл,
+  // скачивая его с самого начала, и всё это время у них чёрный экран. Пересобираем без перекодирования — индекс появляется.
+  const src = path.join(db.UPLOAD_DIR, rec.file);
+  const fixedName = crypto.randomBytes(16).toString('hex') + ext;
+  const fixed = path.join(db.UPLOAD_DIR, fixedName);
+  execFile('ffmpeg', ['-y', '-v', 'error', '-i', src, '-c', 'copy', fixed], { timeout: 30 * 60_000 }, (err) => {
+    const cur = db.getRecording(rec.id);
+    if (err || !cur) { fs.rm(fixed, () => {}); if (cur) transcodeRecording(cur); return; }
+    db.updateRecording(rec.id, { file: fixedName });
+    setTimeout(() => fs.rm(src, () => {}), 6 * 3600_000).unref();
+    // Шаг 2 (долго, в фоне): перекодирование в MP4, который играет везде
+    transcodeRecording(db.getRecording(rec.id));
+  });
+}
+
+function transcodeRecording(rec) {
   const src = path.join(db.UPLOAD_DIR, rec.file);
   execFile('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height:format=bit_rate', '-of', 'json', src], (perr, out) => {
     if (perr) return;
@@ -277,7 +295,7 @@ function optimizeRecording(rec) {
     const dst = path.join(db.UPLOAD_DIR, outName);
     const args = ['-y', '-v', 'error', '-i', src];
     if (compatible) args.push('-c', 'copy');
-    else args.push('-vf', "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+    else args.push('-vf', "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2", '-c:v', 'libx264', '-preset', 'superfast', '-crf', '24',
       '-maxrate', '1800k', '-bufsize', '3600k', '-g', '48', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
     args.push('-movflags', '+faststart', dst);
     // перекодирование — с низким приоритетом, чтобы не мешать встречам
@@ -352,6 +370,23 @@ app.delete('/api/recordings/:id', requireAdmin, (req, res) => {
   db.deleteRecording(req.params.id);
   res.json({ ok: true });
 });
+
+// ---------- Диагностика ----------
+// Браузеры участников сообщают о проблемах (видео не грузится, обрыв соединения, нет доступа к камере).
+// Смотреть: video diag (или journalctl -u conference | grep DIAG)
+const diagHits = new Map(); // ip -> {n, reset}
+app.post('/api/diag', (req, res) => {
+  res.sendStatus(204);
+  const now = Date.now();
+  const h = diagHits.get(req.ip) || { n: 0, reset: now + 60_000 };
+  if (now > h.reset) { h.n = 0; h.reset = now + 60_000; }
+  if (++h.n > 20) return;
+  diagHits.set(req.ip, h);
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  const clean = (v, n) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v)).replace(/[\r\n]+/g, ' ').slice(0, n);
+  console.log(`DIAG room=${clean(b.room, 20)} who=${clean(b.name, 40)} kind=${clean(b.kind, 30)} ${clean(b.detail, 300)} | ${clean(req.headers['user-agent'], 160)}`);
+});
+setInterval(() => { const now = Date.now(); for (const [k, v] of diagHits) if (now > v.reset) diagHits.delete(k); }, 300_000).unref();
 
 // ---------- Эмодзи ----------
 // Нарисованный набор (public/emoji/pack/*.svg) + Apple-эмодзи + загруженные админом картинки

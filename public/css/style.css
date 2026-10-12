@@ -348,3 +348,8 @@ img.emoji-inline { height: 1.45em; width: auto; vertical-align: -0.35em; margin:
   .watch-actions .btn { flex: 1; }
   .watch-kind { display: none; }
 }
+
+/* Загрузка записи поверх плитки/сцены */
+.pb-loading { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; background: rgba(7, 8, 12, .55); color: var(--muted); font-size: 13px; z-index: 3; pointer-events: none; }
+.pb-loading .spinner { width: 34px; height: 34px; border-width: 3px; margin: 0; }
+.tile .name, .tile .net, .tile .hand, .stage .label { z-index: 4; }
