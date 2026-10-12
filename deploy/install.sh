@@ -90,7 +90,7 @@ fi
 
 # ---------- Домен и пароль ----------
 if [ -z "${DOMAIN:-}" ]; then
-  DEFAULT_DOMAIN="${PUBLIC_IP//./-}.sslip.io"
+  DEFAULT_DOMAIN="meet.${PUBLIC_IP//./-}.sslip.io"
   echo
   echo "Укажите домен или поддомен, направленный (A-запись) на IP $PUBLIC_IP, например meet.mysite.ru"
   echo "Если домена нет — нажмите Enter, будет бесплатный адрес $DEFAULT_DOMAIN"
@@ -269,6 +269,12 @@ elif [ -n "$CADDY_CONTAINER" ]; then
   if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
     HTTPS_OK=0
   else
+    MARK="# --- видеовстречи (conference) ---"
+    # блок с этим доменом есть, но добавлен не нами — это чужой сайт, его не трогаем
+    if grep -qxF "$DOMAIN {" "$SRC" && ! grep -A1 -xF "$MARK" "$SRC" | grep -qxF "$DOMAIN {"; then
+      die "домен $DOMAIN уже занят другим сайтом в $SRC. Ничего не изменено.
+Запустите с другим доменом, например: sudo DOMAIN=meet.${PUBLIC_IP//./-}.sslip.io bash install.sh"
+    fi
     BACKUP="$SRC.bak-$(date +%Y%m%d-%H%M%S)"
     cp -p "$SRC" "$BACKUP"
     echo "Резервная копия: $BACKUP"
@@ -283,7 +289,7 @@ elif [ -n "$CADDY_CONTAINER" ]; then
       rm -f "$SRC.new"
       ACTION="обновлён"
     else
-      printf '\n# --- видеовстречи (conference) ---\n%s\n' "$SITE_BLOCK" >> "$SRC"
+      printf '\n%s\n%s\n' "$MARK" "$SITE_BLOCK" >> "$SRC"
       ACTION="добавлен"
     fi
     if docker exec "$CADDY_CONTAINER" caddy validate --config "$CFG" --adapter caddyfile >/dev/null 2>&1 \
