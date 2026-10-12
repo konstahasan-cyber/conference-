@@ -10,8 +10,8 @@ let seeking = false;
 const inviteUrl = `${location.origin}/r/${roomId}`;
 $('#inviteLink').value = inviteUrl;
 $('#roomCode').textContent = roomId;
-$('#enterBtn').href = `/r/${roomId}`;
-$('#observeBtn').href = `/r/${roomId}?observer=1`;
+$('#enterBtn').href = `/r/${roomId}?live=1`;
+$('#observeBtn').href = `/r/${roomId}`;
 $('#copyLink').onclick = async () => { await navigator.clipboard.writeText(inviteUrl).catch(() => {}); toast('Ссылка скопирована'); };
 
 socket.on('connect', () => emit('admin:watch'));
@@ -98,7 +98,7 @@ function render() {
 
   const pv = $('#pbPreview');
   if (playback.url && ['playing', 'paused'].includes(playback.status)) {
-    const abs = new URL(playback.url, location.href).href;
+    const abs = new URL(pickMediaUrl(playback.url, playback.altUrl), location.href).href;
     if (pv.src !== abs) pv.src = abs;
   } else if (pv.src) { pv.removeAttribute('src'); pv.load(); }
   syncPreview(true);
@@ -124,6 +124,12 @@ function syncPreview(force) {
   if (p.status !== 'playing' && !pv.paused) pv.pause();
 }
 $('#pbPreview').onloadedmetadata = () => syncPreview(true);
+$('#pbListen').onclick = () => {
+  const pv = $('#pbPreview');
+  pv.muted = !pv.muted;
+  if (!pv.muted) pv.play().catch(() => {});
+  $('#pbListen').innerHTML = pv.muted ? `${ic('volume-x', 'sm')}Включить звук` : `${ic('volume-2', 'sm')}Выключить звук`;
+};
 setInterval(() => syncPreview(false), 1000);
 
 $('#chatEmoji').onclick = () => emojiPicker($('#chatEmoji'), (code, text) => { $('#chatText').value += text; $('#chatText').focus(); });

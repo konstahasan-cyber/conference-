@@ -41,6 +41,10 @@ window.fmtTime = (sec) => {
 };
 window.fmtDate = (iso) => new Date(iso).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
+// MP4 (H.264) играет почти везде; если браузер его не умеет — берём исходный файл записи
+const CAN_H264 = !!document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
+window.pickMediaUrl = (url, altUrl) => (altUrl && /\.mp4$/.test(url || '') && !CAN_H264 ? altUrl : url);
+
 window.api = async (url, opts = {}) => {
   const res = await fetch(url, {
     ...opts,

@@ -33,7 +33,7 @@ const SECRET_FILE = path.join(path.dirname(db.UPLOAD_DIR), 'secret.key');
 if (!fs.existsSync(SECRET_FILE)) fs.writeFileSync(SECRET_FILE, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
 const SECRET = fs.readFileSync(SECRET_FILE, 'utf8').trim();
 
-const OWNER = { id: db.OWNER_ID, login: ADMIN_LOGIN, name: 'Главный администратор', role: 'owner' };
+const ownerUser = () => ({ id: db.OWNER_ID, login: ADMIN_LOGIN, name: db.adminName(db.OWNER_ID), role: 'owner' });
 
 // при смене пароля старые входы перестают действовать
 const passwordStamp = (userId) => (userId === db.OWNER_ID ? ADMIN_PASSWORD : db.getUser(userId)?.hash || '');
@@ -58,7 +58,7 @@ function userFromCookie(cookieHeader) {
   if (!userId || !(Number(exp) > Date.now())) return null;
   const expected = signToken(userId, exp);
   if (expected.length !== token.length || !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(token))) return null;
-  if (userId === db.OWNER_ID) return OWNER;
+  if (userId === db.OWNER_ID) return ownerUser();
   const u = db.getUser(userId);
   return u ? { id: u.id, login: u.login, name: u.name, role: 'admin' } : null;
 }
@@ -113,6 +113,14 @@ app.post('/api/logout', (req, res) => {
 app.get('/api/me', (req, res) => {
   const user = userFromCookie(req.headers.cookie);
   res.json({ admin: !!user, user });
+});
+
+// своё имя — от него ведутся автовебинары
+app.patch('/api/me', requireAdmin, (req, res) => {
+  const name = db.setAdminName(req.user.id, req.body?.name);
+  if (!name) return res.status(400).json({ error: 'Введите имя' });
+  for (const r of db.listRooms(req.user.id)) onRoomUpdated(r.id);
+  res.json({ ok: true, name });
 });
 
 app.get('/api/config', (req, res) => {
@@ -177,6 +185,7 @@ app.get('/api/rooms/:id/public', (req, res) => {
     id: room.id, name: room.name,
     allowCamera: room.settings.allowCamera, allowMic: room.settings.allowMic,
     isOwner: !!user && user.id === room.ownerId,
+    adminName: user && user.id === room.ownerId ? db.adminName(room.ownerId) : undefined,
   });
 });
 
@@ -274,9 +283,14 @@ function optimizeRecording(rec) {
         const d = parseFloat(dout);
         let size = 0;
         try { size = fs.statSync(dst).size; } catch (e) {}
-        db.updateRecording(rec.id, { file: outName, mime: 'video/mp4', duration: !e2 && d > 0 ? d : undefined, size });
-        // старый файл удаляем позже: его ещё могут досматривать участники идущей встречи
-        setTimeout(() => fs.rm(src, () => {}), 6 * 3600_000).unref();
+        if (compatible) {
+          db.updateRecording(rec.id, { file: outName, mime: 'video/mp4', duration: !e2 && d > 0 ? d : undefined, size });
+          // старый файл удаляем позже: его ещё могут досматривать участники идущей встречи
+          setTimeout(() => fs.rm(src, () => {}), 6 * 3600_000).unref();
+        } else {
+          // исходник оставляем запасным вариантом для браузеров без H.264
+          db.updateRecording(rec.id, { file: outName, altFile: rec.file, mime: 'video/mp4', duration: !e2 && d > 0 ? d : undefined, size });
+        }
       });
     });
   });
@@ -480,6 +494,7 @@ function playbackPayload(roomId) {
     status: rec ? play.status : 'idle',
     recordingId: rec?.id || null,
     url: rec ? `/media/${rec.file}` : null,
+    altUrl: rec?.altFile ? `/media/${rec.altFile}` : null,
     title: rec?.title || null,
     duration: rec?.duration || null,
     position: rec ? playbackPosition(play) : 0,
@@ -500,7 +515,7 @@ function guestRoomInfo(room) {
       name: pb.presenterName,
       display: pb.display,
       // «виртуальный ведущий» отображается как обычный участник
-      visible: pb.display === 'camera' && !!pb.recordingId && (active || pb.showPresenterBeforeStart),
+      visible: pb.display === 'camera' && (active || (!!pb.recordingId && pb.showPresenterBeforeStart)),
     },
   };
 }

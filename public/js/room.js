@@ -23,6 +23,7 @@ const S = {
   unread: 0,
   joinedAt: 0,
   isOwner: false,
+  isAdmin: false,
   observer: false,
 };
 let audioCtx = null;
@@ -48,16 +49,19 @@ function ensureAudioCtx() {
       loadEmojis(roomId),
     ]);
     S.iceServers = cfg.iceServers;
+    api('/api/me').then((m) => (S.isAdmin = m.admin)).catch(() => {});
     S.isOwner = info.isOwner;
-    S.observer = info.isOwner && params.get('observer') === '1';
+    // админ по умолчанию входит невидимо (автовебинар); ?live=1 — сразу «в эфир»
+    S.observer = info.isOwner && params.get('live') !== '1';
     S.perms = { allowCam: info.allowCamera, allowMic: info.allowMic };
     $('#preTitle').textContent = info.name;
     $('#preCode').textContent = `Код встречи: ${info.id}`;
     document.title = info.name;
     if (S.isOwner) {
       $('#hostNote').classList.remove('hidden');
-      $('#hostNoteText').textContent = S.observer ? 'Вы войдёте невидимо — участники вас не увидят' : 'Вы войдёте как ведущий';
-      if (S.observer) $('#hostNote').querySelector('[data-ic]')?.style.setProperty('--ic', 'url(/icons/eye-off.svg)');
+      $(`input[name=hostMode][value=${S.observer ? 'hidden' : 'live'}]`).checked = true;
+      // имя админа — то же, от которого ведётся автовебинар
+      if (info.adminName) $('#nameInput').value = info.adminName;
     }
   } catch (e) {
     $('#preTitle').textContent = 'Встреча не найдена';
@@ -91,6 +95,7 @@ function updatePrejoin() {
 $('#preCam').onclick = async () => { S.local.video ? stopLocal('video') : await startLocal('video'); updatePrejoin(); };
 $('#preMic').onclick = async () => { ensureAudioCtx(); S.local.audio ? stopLocal('audio') : await startLocal('audio'); updatePrejoin(); };
 $('#preSettings').onclick = () => openDevices();
+$$('input[name=hostMode]').forEach((r) => (r.onchange = () => { S.observer = $('input[name=hostMode][value=hidden]').checked; updatePrejoin(); }));
 
 function mediaError(kind, e) {
   const what = kind === 'video' ? 'камере' : 'микрофону';
@@ -233,6 +238,8 @@ function showEnd(title, text) {
   $('#endTitle').textContent = title;
   $('#endText').textContent = text || '';
   $('#unmuteBtn').classList.add('hidden');
+  $('#endAdmin').classList.toggle('hidden', !S.isAdmin);
+  $('#endAdmin').href = S.isOwner ? `/admin/room/${encodeURIComponent(roomId)}` : '/admin';
   show('end');
 }
 
@@ -788,7 +795,7 @@ function renderManage() {
     ${switchesHtml(room.settings, 'data-mset')}
     <div class="section-title">Запись ${status}</div>
     <select id="mRec" style="margin-bottom:8px">${recOptions || '<option value="">Нет записей</option>'}</select>
-    <div class="small muted" style="margin-bottom:8px">${playback.title ? esc(playback.title) + ' · ' : ''}${fmtTime(playback.position)}${playback.duration ? ' / ' + fmtTime(playback.duration) : ''}</div>
+    <div class="small muted" style="margin-bottom:8px">${playback.title ? esc(playback.title) + ' · ' : ''}<span id="mPos">${fmtTime(expectedPos())}</span>${playback.duration ? ' / ' + fmtTime(playback.duration) : ''}</div>
     <div class="row" style="gap:6px">
       <button class="btn sm ok" data-pb="start">${ic('play', 'sm')} Сначала</button>
       ${playback.status === 'playing' ? `<button class="btn sm" data-pb="pause">${ic('pause', 'sm')} Пауза</button>` : ''}
@@ -957,6 +964,10 @@ pbVideo.disablePictureInPicture = true;
 pbVideo.setAttribute('disableRemotePlayback', '');
 pbVideo.oncontextmenu = (e) => e.preventDefault();
 pbVideo.style.pointerEvents = 'none';
+pbVideo.addEventListener('error', () => {
+  const alt = S.playback?.altUrl && new URL(S.playback.altUrl, location.href).href;
+  if (alt && pbVideo.src !== alt) { pbVideo.src = alt; pbVideo.load(); syncVideo(true); }
+});
 if (S.dev.spk) pbVideo.setSinkId?.(S.dev.spk).catch(() => {});
 
 function expectedPos() {
@@ -970,7 +981,7 @@ function applyPlayback(pb) {
   S.playback = pb;
   const active = pb.url && (pb.status === 'playing' || pb.status === 'paused');
   if (active) {
-    const abs = new URL(pb.url, location.href).href;
+    const abs = new URL(pickMediaUrl(pb.url, pb.altUrl), location.href).href;
     if (pbVideo.src !== abs) { pbVideo.src = abs; pbVideo.load(); }
     syncVideo(true);
   } else {
@@ -1066,5 +1077,8 @@ setInterval(() => {
 
 // ---------- Часы ----------
 setInterval(() => {
-  if (S.joined) $('#meetClock').textContent = fmtTime((Date.now() - S.joinedAt) / 1000);
+  if (!S.joined) return;
+  $('#meetClock').textContent = fmtTime((Date.now() - S.joinedAt) / 1000);
+  const mPos = $('#mPos');
+  if (mPos && S.playback) mPos.textContent = fmtTime(Math.min(expectedPos(), S.playback.duration || Infinity));
 }, 1000);

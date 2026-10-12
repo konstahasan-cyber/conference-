@@ -29,7 +29,10 @@
       <div class="logo"><span class="mark"><i data-ic="video"></i></span><span id="preTitle">Подключение…</span></div>
       <div class="muted small" id="preCode"></div>
       <label class="field"><span>Ваше имя</span><input id="nameInput" maxlength="40" placeholder="Например, Анна" autocomplete="name"></label>
-      <div id="hostNote" class="hidden badge accent" style="width:100%;justify-content:center;padding:8px"><i data-ic="crown" class="sm"></i> <span id="hostNoteText">Вы войдёте как ведущий</span></div>
+      <div id="hostNote" class="hidden choice">
+        <label><input type="radio" name="hostMode" value="hidden" checked><span><b>Невидимо</b><span class="d">Вас не видно среди участников — встреча идёт как автовебинар, вы всё видите и слышите</span></span></label>
+        <label><input type="radio" name="hostMode" value="live"><span><b>Открыто, в эфир</b><span class="d">С камерой и микрофоном, под вашим именем</span></span></label>
+      </div>
       <button class="btn primary lg block" id="joinBtn">Присоединиться</button>
       <div class="small" id="preError" style="color:#ff8a95"></div>
     </div>
@@ -121,7 +124,10 @@
     <i data-ic="door-open" class="xl" style="margin:0 auto;color:var(--muted)"></i>
     <h2 id="endTitle">Вы покинули встречу</h2>
     <div class="muted" id="endText"></div>
-    <button class="btn primary" onclick="location.reload()">Вернуться</button>
+    <div class="row" style="justify-content:center">
+      <button class="btn primary" onclick="location.reload()"><i data-ic="log-in"></i>Вернуться</button>
+      <a class="btn hidden" id="endAdmin" href="/admin"><i data-ic="layout-grid"></i>В админ-панель</a>
+    </div>
   </div>
 </div>
 

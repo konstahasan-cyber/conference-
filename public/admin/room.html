@@ -13,7 +13,7 @@
     <div class="logo"><span class="mark"><i data-ic="video"></i></span>Встречи</div>
     <a class="nav-item" href="/admin#rooms"><i data-ic="chevron-left"></i>Все встречи</a>
     <a class="nav-item active" href="#"><i data-ic="sliders-horizontal"></i>Пульт</a>
-    <a class="nav-item" id="enterBtn" target="_blank"><i data-ic="log-in"></i>Войти ведущим</a>
+    <a class="nav-item" id="enterBtn" target="_blank"><i data-ic="radio"></i>Войти в эфир</a>
     <a class="nav-item" id="observeBtn" target="_blank"><i data-ic="eye-off"></i>Войти невидимо</a>
     <a class="nav-item" href="/admin#recordings"><i data-ic="film"></i>Записи</a>
   </nav>
@@ -57,7 +57,8 @@
             </div>
             <div class="row"><button class="btn" id="pbReact"><i data-ic="smile-plus"></i>Реакция от имени ведущего</button></div>
             <video id="pbPreview" class="pb-preview" muted playsinline></video>
-            <div class="muted small">Предпросмотр без звука — так сейчас видят участники. Ползунок перематывает запись у всех.</div>
+            <div class="row between"><span class="muted small">Так сейчас видят участники. Ползунок перематывает запись у всех.</span>
+              <button class="btn sm" id="pbListen"><i data-ic="volume-x"></i>Включить звук</button></div>
           </div>
           <div class="stack">
             <div id="pbForm" class="stack"></div>

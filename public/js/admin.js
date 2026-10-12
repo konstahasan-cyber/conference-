@@ -37,8 +37,8 @@ async function loadRooms() {
       <div class="small muted">${rec ? `${ic('film', 'sm')} ${esc(rec.title)} — ${scheduleText(r.playback, r.nextStart)}` : 'Запись не выбрана'}</div>
       <div class="actions">
         <a class="btn sm primary" href="/admin/room/${encodeURIComponent(r.id)}">${ic('sliders-horizontal', 'sm')} Пульт</a>
-        <a class="btn sm" href="/r/${encodeURIComponent(r.id)}" target="_blank">${ic('log-in', 'sm')} Войти</a>
-        <a class="btn sm" href="/r/${encodeURIComponent(r.id)}?observer=1" target="_blank" title="Войти невидимо — участники вас не увидят">${ic('eye-off', 'sm')}</a>
+        <a class="btn sm" href="/r/${encodeURIComponent(r.id)}" target="_blank" title="Войти невидимо — участники вас не увидят">${ic('eye-off', 'sm')} Войти</a>
+        <a class="btn sm" href="/r/${encodeURIComponent(r.id)}?live=1" target="_blank" title="Войти открыто, с камерой и микрофоном">${ic('radio', 'sm')}</a>
         <button class="btn sm" data-copy="${esc(r.id)}" title="Скопировать ссылку">${ic('link', 'sm')}</button>
         <button class="btn sm" data-dup="${esc(r.id)}" title="Дублировать с теми же настройками">${ic('copy-plus', 'sm')}</button>
         <button class="btn sm danger" data-del="${esc(r.id)}" title="Удалить">${ic('trash-2', 'sm')}</button>
@@ -102,7 +102,7 @@ $('#recBody').onclick = async (e) => {
   if (b.dataset.view) {
     $('#previewCard').classList.remove('hidden');
     $('#previewTitle').textContent = rec.title;
-    $('#previewVideo').src = `/media/${rec.file}`;
+    $('#previewVideo').src = pickMediaUrl(`/media/${rec.file}`, rec.altFile && `/media/${rec.altFile}`);
     $('#previewVideo').play().catch(() => {});
     $('#previewVideo').onloadedmetadata = () => {
       // если длительность ещё не известна — сохраняем её
@@ -368,13 +368,28 @@ $('#userForm').onsubmit = async (e) => {
   } catch (err) { toast(err.message); }
 };
 
+// ---------- Имя админа ----------
+$('#meRole').style.cursor = $('#meName').style.cursor = 'pointer';
+$('#meRole').onclick = $('#meName').onclick = async () => {
+  const name = prompt('Ваше имя — от него ведутся ваши автовебинары (имя ведущего на плитке, в чате, при входе):', me.name);
+  if (!name || name.trim() === me.name) return;
+  try {
+    const r = await api('/api/me', { method: 'PATCH', body: { name } });
+    me.name = r.name;
+    $('#meName').textContent = me.name;
+    $('#meAva').innerHTML = avatarHtml(me.name);
+    toast('Имя изменено — во встречах оно тоже обновилось');
+    openTab(location.hash.slice(1) || 'rooms');
+  } catch (e) { toast(e.message); }
+};
+
 // ---------- Старт ----------
 (async () => {
   me = (await api('/api/me')).user;
   if (!me) return location.reload();
   $('#meAva').innerHTML = avatarHtml(me.name);
   $('#meName').textContent = me.name;
-  $('#meRole').textContent = me.role === 'owner' ? 'главный админ' : me.login;
+  $('#meRole').textContent = me.role === 'owner' ? 'главный админ · изменить имя' : `${me.login} · изменить имя`;
   $('#navAdmins').classList.toggle('hidden', me.role !== 'owner');
   const h = location.hash.slice(1);
   openTab(tabs.includes(h) ? h : 'rooms');
