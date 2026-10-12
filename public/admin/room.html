@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Управление встречей</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="admin-layout">
+  <div class="admin-head">
+    <a href="/admin" class="btn ghost">← Все встречи</a>
+    <h1 class="grow" id="roomTitle">…</h1>
+    <a class="btn primary" id="enterBtn" target="_blank">Войти в комнату</a>
+    <button class="btn danger" id="endBtn">Завершить для всех</button>
+  </div>
+
+  <div class="admin-grid">
+    <div class="card stack">
+      <h3>Приглашение</h3>
+      <div class="copy-box"><input id="inviteLink" readonly><button class="btn" id="copyLink">Копировать</button></div>
+      <label class="field"><span>Название встречи</span>
+        <div class="row"><input id="roomName" maxlength="100" class="grow" style="width:auto"><button class="btn" id="saveName">Сохранить</button></div></label>
+      <h3 style="margin-top:20px">Доступ и права</h3>
+      <label class="switch"><span>Зал ожидания (вход только с разрешения)</span><input type="checkbox" data-set="waitingRoom"><span class="knob"></span></label>
+      <label class="switch"><span>Закрыть встречу (новые не смогут войти)</span><input type="checkbox" data-set="locked"><span class="knob"></span></label>
+      <label class="switch"><span>Участникам можно включать камеру</span><input type="checkbox" data-set="allowCamera"><span class="knob"></span></label>
+      <label class="switch"><span>Участникам можно включать микрофон</span><input type="checkbox" data-set="allowMic"><span class="knob"></span></label>
+      <label class="switch"><span>Участникам можно писать в чат</span><input type="checkbox" data-set="allowChat"><span class="knob"></span></label>
+      <div class="muted small">Общие права действуют на всех. Для отдельного участника их можно переопределить в списке справа.</div>
+    </div>
+
+    <div class="card">
+      <h3>Участники</h3>
+      <div id="controls"></div>
+    </div>
+
+    <div class="card span2">
+      <h3>Показ записи</h3>
+      <div class="admin-grid">
+        <div class="stack">
+          <label class="field"><span>Запись</span><select id="pbRec"></select></label>
+          <div class="muted small">Нет нужной записи? <a href="/admin#recordings">Загрузите</a> или <a href="/admin#studio">запишите</a> её.</div>
+          <div class="field"><span class="muted small">Как показывать</span>
+            <div class="radio-group">
+              <label><input type="radio" name="pbDisplay" value="camera"> <span><b>Как камера ведущего</b><br><span class="muted small">Видео выглядит как обычный участник с включённой камерой, звук идёт из видео.</span></span></label>
+              <label><input type="radio" name="pbDisplay" value="presentation"> <span><b>Как демонстрация экрана</b><br><span class="muted small">Видео на весь экран как презентация.</span></span></label>
+            </div>
+          </div>
+          <label class="field"><span>Имя ведущего на плитке</span><input id="pbName" maxlength="60"></label>
+          <label class="switch"><span>Показывать ведущего (без видео) до старта</span><input type="checkbox" id="pbShowBefore"><span class="knob"></span></label>
+        </div>
+        <div class="stack">
+          <div class="field"><span class="muted small">Когда запускать</span>
+            <div class="radio-group">
+              <label><input type="radio" name="pbMode" value="manual"> Вручную — кнопкой «Запустить»</label>
+              <label><input type="radio" name="pbMode" value="scheduled"> <span>По расписанию, в
+                <input type="datetime-local" id="pbAt" style="width:auto;padding:4px 8px"></span></label>
+              <label><input type="radio" name="pbMode" value="firstGuest"> <span>Через <input type="number" id="pbDelay" min="0" max="3600" style="width:80px;padding:4px 8px"> сек. после входа первого участника</span></label>
+            </div>
+            <div class="muted small" style="margin-top:6px">Кто зайдёт позже — увидит запись с текущего момента, как в настоящем эфире.</div>
+          </div>
+          <label class="field"><span>Когда запись закончится</span>
+            <select id="pbEnd"><option value="stay">Оставить участников в комнате</option><option value="endMeeting">Завершить встречу для всех</option></select></label>
+          <button class="btn primary" id="pbSave">Сохранить настройки показа</button>
+        </div>
+      </div>
+
+      <hr style="border:0;border-top:1px solid var(--line);margin:20px 0">
+      <div class="admin-grid">
+        <div class="stack">
+          <div class="row"><b>Статус:</b> <span id="pbStatus"></span></div>
+          <div class="row"><span id="pbPos" class="muted">0:00</span><input type="range" id="pbSeek" min="0" max="100" step="1" value="0" class="grow" style="width:auto"><span id="pbDur" class="muted">0:00</span></div>
+          <div class="row">
+            <button class="btn ok" id="pbStart">▶ Запустить сначала</button>
+            <button class="btn" id="pbPause">⏸ Пауза</button>
+            <button class="btn" id="pbResume">⏵ Продолжить</button>
+            <button class="btn danger" id="pbStop">■ Остановить</button>
+          </div>
+          <div class="muted small">Ползунок перематывает запись у всех участников одновременно.</div>
+          <div class="row"><button class="btn" id="pbReact">😊 Реакция от имени ведущего</button></div>
+        </div>
+        <div>
+          <video id="pbPreview" class="pb-preview" muted playsinline></video>
+          <div class="muted small">Предпросмотр без звука — так сейчас видят участники.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card span2">
+      <h3>Чат встречи</h3>
+      <div class="chat-list" id="chatList" style="max-height:300px;overflow-y:auto;margin-bottom:12px"></div>
+      <form class="row" id="chatForm">
+        <input id="chatAs" placeholder="От имени" style="width:180px" maxlength="60">
+        <button type="button" class="btn" id="chatEmoji">😊</button>
+        <input id="chatText" class="grow" style="width:auto" placeholder="Сообщение всем участникам" maxlength="1000" autocomplete="off">
+        <button class="btn primary">Отправить</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/common.js"></script>
+<script src="/js/admin-room.js"></script>
+</body>
+</html>

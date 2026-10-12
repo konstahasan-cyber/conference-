@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Видеовстречи</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="center-page">
+  <form class="card stack" style="max-width:420px;width:100%" id="f">
+    <h1>Подключиться к встрече</h1>
+    <div class="muted">Введите код встречи или вставьте ссылку-приглашение.</div>
+    <input id="code" placeholder="abc-defg-hij" autofocus>
+    <button class="btn primary" style="width:100%">Подключиться</button>
+    <div class="muted small" style="text-align:center"><a href="/admin">Вход для организатора</a></div>
+  </form>
+</div>
+<script>
+document.getElementById('f').onsubmit = (e) => {
+  e.preventDefault();
+  let v = document.getElementById('code').value.trim();
+  if (!v) return;
+  const m = v.match(/\/r\/([^/?#]+)/);
+  if (m) v = m[1];
+  location.href = '/r/' + encodeURIComponent(v.toLowerCase());
+};
+</script>
+</body>
+</html>

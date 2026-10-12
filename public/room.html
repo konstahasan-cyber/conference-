@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Встреча</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<!-- Экран перед входом -->
+<div id="prejoinView" class="center-page">
+  <div class="prejoin">
+    <div>
+      <div class="preview">
+        <video id="previewVideo" autoplay playsinline muted></video>
+        <div class="off" id="previewOff">Камера выключена</div>
+        <div class="controls">
+          <button class="btn" id="preMic">🎤 Микрофон выкл.</button>
+          <button class="btn" id="preCam">📷 Камера выкл.</button>
+        </div>
+      </div>
+    </div>
+    <div class="card stack">
+      <h2 id="preTitle">Подключение к встрече</h2>
+      <div class="muted small" id="preCode"></div>
+      <label class="field"><span>Ваше имя</span><input id="nameInput" maxlength="40" placeholder="Например, Анна" autocomplete="name"></label>
+      <div id="hostOptions" class="hidden stack">
+        <label class="row"><input type="checkbox" id="asHost" checked> Войти как ведущий (администратор)</label>
+        <label class="row"><input type="checkbox" id="asHidden"> Невидимо (наблюдатель, участники меня не видят)</label>
+      </div>
+      <button class="btn primary" id="joinBtn" style="width:100%">Присоединиться</button>
+      <div class="muted small" id="preError"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Зал ожидания -->
+<div id="waitingView" class="center-page hidden">
+  <div class="card stack" style="max-width:440px;text-align:center">
+    <div class="spinner"></div>
+    <h2>Пожалуйста, подождите</h2>
+    <div class="muted">Организатор скоро впустит вас на встречу <b id="waitTitle"></b>.</div>
+    <button class="btn" id="cancelWait">Отменить</button>
+  </div>
+</div>
+
+<!-- Встреча -->
+<div id="meetingView" class="meeting hidden">
+  <div class="topbar">
+    <div class="title grow" id="meetTitle"></div>
+    <span class="muted small" id="meetClock"></span>
+  </div>
+  <div class="main">
+    <div class="content" id="content">
+      <div class="stage hidden" id="stage"><div class="label" id="stageLabel"></div></div>
+      <div class="grid" id="grid"></div>
+    </div>
+    <aside class="side hidden" id="side">
+      <header><span id="sideTitle"></span><button class="btn sm ghost" id="sideClose">✕</button></header>
+      <div class="body" id="sideBody">
+        <div id="peoplePanel" class="hidden">
+          <div id="hostControls"></div>
+          <ul class="plist" id="peopleList"></ul>
+        </div>
+        <div id="chatPanel" class="hidden"><div class="chat-list" id="chatList"></div></div>
+      </div>
+      <form class="chat-form hidden" id="chatForm">
+        <button type="button" class="btn" id="chatEmoji" title="Эмодзи">😊</button>
+        <input id="chatInput" maxlength="1000" placeholder="Сообщение всем" autocomplete="off">
+        <button class="btn primary">➤</button>
+      </form>
+    </aside>
+  </div>
+  <div class="bottombar">
+    <button class="ctrl" id="btnMic"><span class="i">🎤</span><span class="t">Микрофон</span></button>
+    <button class="ctrl" id="btnCam"><span class="i">📷</span><span class="t">Видео</span></button>
+    <button class="ctrl hidden" id="btnScreen"><span class="i">🖥</span><span class="t">Демонстрация</span></button>
+    <button class="ctrl" id="btnReact"><span class="i">😊</span><span class="t">Реакции</span></button>
+    <button class="ctrl" id="btnHand"><span class="i">✋</span><span class="t">Поднять руку</span></button>
+    <button class="ctrl" id="btnPeople"><span class="i">👥</span><span class="t">Участники</span><span class="count hidden" id="waitCount"></span></button>
+    <button class="ctrl" id="btnChat"><span class="i">💬</span><span class="t">Чат</span><span class="count hidden" id="chatCount"></span></button>
+    <button class="ctrl leave" id="btnLeave"><span class="i">⏏</span><span class="t">Выйти</span></button>
+  </div>
+</div>
+
+<!-- Сообщения о завершении -->
+<div id="endView" class="center-page hidden">
+  <div class="card stack" style="max-width:440px;text-align:center">
+    <h2 id="endTitle">Вы покинули встречу</h2>
+    <div class="muted" id="endText"></div>
+    <button class="btn primary" onclick="location.reload()">Вернуться</button>
+  </div>
+</div>
+
+<button class="btn primary unmute-banner hidden" id="unmuteBtn">🔊 Нажмите, чтобы включить звук</button>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/common.js"></script>
+<script src="/js/room.js"></script>
+</body>
+</html>

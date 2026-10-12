@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход в админ-панель</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="center-page">
+  <form class="card stack" style="max-width:380px;width:100%" id="f">
+    <h1>Админ-панель</h1>
+    <label class="field"><span>Пароль</span><input type="password" id="pw" autofocus autocomplete="current-password"></label>
+    <button class="btn primary" style="width:100%">Войти</button>
+    <div class="small" id="err" style="color:var(--danger)"></div>
+  </form>
+</div>
+<script src="/js/common.js"></script>
+<script>
+$('#f').onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    await api('/api/login', { method: 'POST', body: { password: $('#pw').value } });
+    location.reload();
+  } catch (err) { $('#err').textContent = err.message; }
+};
+</script>
+</body>
+</html>

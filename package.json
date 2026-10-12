@@ -1,0 +1,19 @@
+{
+  "name": "conference",
+  "version": "1.0.0",
+  "description": "Сервис видеоконференций с залом ожидания, админ-панелью и показом заранее записанных эфиров",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.22.3",
+    "multer": "^1.4.4",
+    "socket.io": "^4.8.4"
+  }
+}

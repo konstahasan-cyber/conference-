@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Админ-панель</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="admin-layout">
+  <div class="admin-head">
+    <h1 class="grow">Админ-панель</h1>
+    <button class="btn" id="logout">Выйти</button>
+  </div>
+  <div class="tabs">
+    <button data-tab="rooms" class="active">Встречи</button>
+    <button data-tab="recordings">Записи</button>
+    <button data-tab="studio">Студия записи</button>
+    <button data-tab="emojis">Эмодзи</button>
+  </div>
+
+  <!-- Встречи -->
+  <section id="tab-rooms" class="stack">
+    <form class="card row" id="newRoom">
+      <input id="newRoomName" class="grow" style="width:auto" placeholder="Название новой встречи" maxlength="100">
+      <button class="btn primary">+ Создать встречу</button>
+    </form>
+    <div class="card" style="overflow-x:auto">
+      <table class="table">
+        <thead><tr><th>Название</th><th>Код</th><th>Сейчас</th><th>Запись</th><th></th></tr></thead>
+        <tbody id="roomsBody"></tbody>
+      </table>
+      <div class="muted" id="roomsEmpty">Встреч пока нет — создайте первую.</div>
+    </div>
+  </section>
+
+  <!-- Записи -->
+  <section id="tab-recordings" class="stack hidden">
+    <form class="card stack" id="uploadForm">
+      <h3>Загрузить видео</h3>
+      <div class="muted small">Подойдут MP4 (H.264/AAC) и WebM — они воспроизводятся во всех браузерах. Звук берётся из самого видео.</div>
+      <div class="row">
+        <input type="file" id="upFile" accept="video/*" class="grow" style="width:auto">
+        <input id="upTitle" placeholder="Название (необязательно)" class="grow" style="width:auto">
+        <button class="btn primary" id="upBtn">Загрузить</button>
+      </div>
+      <div class="progress hidden" id="upProg"><div></div></div>
+      <div class="small muted" id="upInfo"></div>
+    </form>
+    <div class="card" style="overflow-x:auto">
+      <table class="table">
+        <thead><tr><th>Название</th><th>Длительность</th><th>Размер</th><th>Загружено</th><th></th></tr></thead>
+        <tbody id="recBody"></tbody>
+      </table>
+      <div class="muted" id="recEmpty">Записей пока нет.</div>
+    </div>
+    <div class="card hidden" id="previewCard">
+      <div class="row" style="margin-bottom:10px"><h3 class="grow" id="previewTitle" style="margin:0"></h3><button class="btn sm" id="previewClose">Закрыть</button></div>
+      <video id="previewVideo" class="pb-preview" controls playsinline></video>
+    </div>
+  </section>
+
+  <!-- Студия -->
+  <section id="tab-studio" class="hidden">
+    <div class="admin-grid">
+      <div class="card stack">
+        <h3>Записать новое видео прямо здесь</h3>
+        <div class="muted small">Запишите своё выступление с камеры или демонстрацию экрана со звуком микрофона — запись сразу сохранится в разделе «Записи».</div>
+        <div class="radio-group">
+          <label><input type="radio" name="src" value="camera" checked> Камера + микрофон</label>
+          <label><input type="radio" name="src" value="screen"> Экран + микрофон</label>
+          <label><input type="radio" name="src" value="screen-cam"> Экран + камера в углу + микрофон</label>
+        </div>
+        <input id="studioTitle" placeholder="Название записи" maxlength="120">
+        <div class="row">
+          <button class="btn" id="stPrepare">Включить камеру/экран</button>
+          <button class="btn danger" id="stRec" disabled>● Начать запись</button>
+          <button class="btn" id="stStop" disabled>■ Стоп</button>
+          <span class="muted" id="stTime"></span>
+        </div>
+        <div class="progress hidden" id="stProg"><div></div></div>
+        <div class="small muted" id="stInfo"></div>
+      </div>
+      <div class="card">
+        <video id="stPreview" class="pb-preview" autoplay playsinline muted></video>
+      </div>
+    </div>
+  </section>
+
+  <!-- Эмодзи -->
+  <section id="tab-emojis" class="stack hidden">
+    <form class="card stack" id="emojiForm">
+      <h3>Добавить свой эмодзи</h3>
+      <div class="muted small">Картинка PNG, GIF (можно анимированную), WebP или JPG до 2 МБ, лучше квадратная с прозрачным фоном.
+        Участники смогут отправлять её как реакцию и вставлять в чат как <code>:имя:</code>.</div>
+      <div class="row">
+        <input type="file" id="emFile" accept="image/png,image/gif,image/webp,image/jpeg" class="grow" style="width:auto">
+        <input id="emName" placeholder="имя, например fire_cat" maxlength="32" class="grow" style="width:auto">
+        <button class="btn primary">Добавить</button>
+      </div>
+    </form>
+    <div class="card">
+      <div class="emoji-grid" id="emojiGrid"></div>
+      <div class="muted" id="emojiEmpty">Своих эмодзи пока нет.</div>
+    </div>
+  </section>
+</div>
+
+<script src="/js/common.js"></script>
+<script src="/js/admin.js"></script>
+</body>
+</html>
