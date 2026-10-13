@@ -106,6 +106,29 @@ $('#preMic').onclick = async () => { ensureAudioCtx(); S.local.audio ? stopLocal
 $('#preSettings').onclick = () => openDevices();
 $$('input[name=hostMode]').forEach((r) => (r.onchange = () => { S.observer = $('input[name=hostMode][value=hidden]').checked; updatePrejoin(); }));
 
+// Ошибки страницы у участников тоже отправляем — по ним видно, почему «у кого-то не открывается»
+window.addEventListener('error', (e) => report('js-error', `${e.message} @ ${String(e.filename).split('/').pop()}:${e.lineno}`, `js-${e.message}`));
+window.addEventListener('unhandledrejection', (e) => report('js-error', `promise: ${e.reason?.message || e.reason}`, `jsp-${e.reason?.message || e.reason}`));
+
+// Встроенные браузеры приложений (Instagram, VK, Facebook и т.п.) часто не дают камеру/звук и автозапуск видео
+(function browserCheck() {
+  const ua = navigator.userAgent;
+  const inApp = /Instagram|FBAN|FBAV|VKClient|vkontakte|Telegram|WhatsApp|Line\/|MicroMessenger|YaBrowser\/.*YaApp|OKApp/i.test(ua);
+  const noRtc = !window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia;
+  let msg = '';
+  if (!window.isSecureContext) msg = 'Откройте встречу по адресу, начинающемуся с https://';
+  else if (inApp) msg = 'Вы открыли ссылку внутри приложения — звук и видео могут не работать. Откройте её в Safari или Chrome.';
+  else if (noRtc) msg = 'Этот браузер не поддерживает видеосвязь. Запись вы увидите, но лучше откройте ссылку в Chrome, Safari, Edge или Firefox.';
+  if (!msg) return;
+  const box = $('#browserWarn');
+  if (box) {
+    box.innerHTML = `${ic('triangle-alert', 'sm')} <span>${esc(msg)}</span> <button class="btn sm" type="button">${ic('copy', 'sm')} Скопировать ссылку</button>`;
+    box.classList.remove('hidden');
+    $('button', box).onclick = async () => { await navigator.clipboard?.writeText(location.href).catch(() => {}); toast('Ссылка скопирована — вставьте её в Safari или Chrome'); };
+  }
+  setTimeout(() => report('browser', `${inApp ? 'встроенный браузер' : noRtc ? 'нет WebRTC' : 'не https'}`, 'browser'), 0);
+})();
+
 // Сообщаем серверу о проблемах у участника — админ видит их командой «video diag»
 const diagSent = new Set();
 function report(kind, detail, once) {
@@ -367,10 +390,9 @@ socket.on('joined', ({ self, peers, room, playback, chat, rejoin }) => {
   $('#chatList').innerHTML = '';
   chat.forEach(addChat);
   S.unread = 0; updateUnread();
-  for (const info of peers) addPeer(info).initiate = true;
-  for (const info of peers) callPeer(info.id);
+  for (const info of peers) addPeer(info);
   applyPlayback(playback);
-  sendMedia();
+  sendMedia(); // заодно поднимет нужные соединения (ensureConnections)
   if (again && S.hand) socket.emit('hand', true);
   updateButtons();
   tuneNet();
@@ -392,7 +414,7 @@ socket.on('disconnect', (reason) => {
   if (reason === 'io server disconnect') socket.connect();
 });
 
-socket.on('peer-joined', (info) => { addPeer(info); layout(); tuneNet(); });
+socket.on('peer-joined', (info) => { addPeer(info); ensureConnections(); layout(); tuneNet(); });
 socket.on('peer-left', ({ id }) => removePeer(id));
 socket.on('peer-updated', (info) => {
   if (info.id === socket.id) {
@@ -404,6 +426,7 @@ socket.on('peer-updated', (info) => {
   const peer = S.peers.get(info.id);
   if (!peer) return;
   peer.info = info;
+  ensureConnections();
   layout();
 });
 socket.on('participants', (list) => {
@@ -412,6 +435,7 @@ socket.on('participants', (list) => {
     const peer = S.peers.get(info.id);
     if (peer) peer.info = info;
   }
+  ensureConnections();
   layout();
 });
 socket.on('room-updated', (room) => applyRoom(room));
@@ -546,7 +570,7 @@ function newPC(id) {
 async function callPeer(id) {
   const peer = S.peers.get(id);
   if (!peer) return;
-  peer.chain = peer.chain.then(async () => {
+  return peer.chain = peer.chain.then(async () => {
     const pc = newPC(id);
     const a = pc.addTransceiver('audio', { direction: 'sendrecv' });
     const v = pc.addTransceiver('video', { direction: 'sendrecv' });
@@ -595,7 +619,26 @@ const pushAudioTrack = () => replaceAll('audio', S.local.audio);
 function sendMedia() {
   if (!S.joined || S.reconnecting) return;
   socket.emit('media', { cam: !!(S.local.video || S.local.screen), mic: !!S.local.audio, screen: !!S.local.screen });
+  ensureConnections();
   layout();
+}
+
+// «Ленивые» соединения: напрямую соединяемся с участником, только если хотя бы у одного из нас
+// включены камера, микрофон или демонстрация. Зрители без камер между собой не соединяются —
+// иначе при 50 участниках каждый браузер держал бы 49 соединений и не справлялся.
+const hasMedia = (info) => !!(info && (info.cam || info.mic || info.screen));
+const selfHasMedia = () => !!(S.local.audio || S.local.video || S.local.screen);
+function ensureConnections() {
+  if (!S.joined || S.reconnecting) return;
+  for (const [id, peer] of S.peers) {
+    // кто звонит — решаем одинаково на обеих сторонах, чтобы не позвонить друг другу одновременно
+    peer.initiate = socket.id < id;
+    if (peer.pc && peer.pc.connectionState !== 'closed') continue;
+    if (peer.calling || !peer.initiate) continue;
+    if (!selfHasMedia() && !hasMedia(peer.info)) continue;
+    peer.calling = true;
+    callPeer(id).finally(() => { peer.calling = false; });
+  }
 }
 
 // ---------- Автовоспроизведение ----------

@@ -88,6 +88,12 @@ run_check() {
   else
     bad "https://$domain/api/me не отвечает (Caddy, DNS или сертификат)"
   fi
+  case "$domain" in
+    *sslip.io|*nip.io)
+      echo -e "\033[1;33m⚠  Адрес $domain — временный бесплатный. Его иногда блокируют антивирусы,"
+      echo -e "   корпоративные сети и некоторые провайдеры — у части людей сайт просто не откроется."
+      echo -e "   Лучше купить свой домен (от ~200 ₽/год) и перенастроить: sudo DOMAIN=ваш.домен bash /opt/conference/deploy/install.sh\033[0m" ;;
+  esac
 
   echo "--- TURN-сервер (coturn) ---"
   if systemctl is-active --quiet coturn 2>/dev/null; then

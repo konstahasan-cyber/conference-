@@ -529,10 +529,29 @@ function getLive(roomId) {
       firstGuestTimer: null,
       endTimer: null,
     };
+    const saved = db.getLiveState(roomId);
+    if (saved?.play && db.getRecording(saved.play.recordingId)) {
+      live.play = saved.play;
+      live.autoStartedFor = saved.autoStartedFor ?? null;
+      live.scheduleKey = saved.scheduleKey;
+    }
     lives.set(roomId, live);
+    if (live.play.status === 'playing') setImmediate(() => scheduleEnd(roomId));
   }
   return live;
 }
+
+// сохраняем состояние эфира на диск при каждом изменении
+function persistPlay(roomId) {
+  const live = lives.get(roomId);
+  if (!live || !db.getRoom(roomId)) return;
+  const idle = live.play.status === 'idle' && live.autoStartedFor === null;
+  db.setLiveState(roomId, idle ? null : { play: live.play, autoStartedFor: live.autoStartedFor, scheduleKey: live.scheduleKey });
+}
+
+const hostInRoom = (roomId) => [...(lives.get(roomId)?.participants.values() || [])].some((p) => p.role === 'host');
+// зал ожидания действует, только пока организатор во встрече (если включён автовпуск)
+const needsWaiting = (room) => room.settings.waitingRoom && !(room.settings.autoAdmitNoHost && !hostInRoom(room.id));
 
 function liveSummary(roomId) {
   const live = lives.get(roomId);
@@ -618,6 +637,7 @@ function notifyAdmins(roomId) {
 }
 
 function broadcastPlayback(roomId) {
+  persistPlay(roomId);
   const payload = playbackPayload(roomId);
   io.to(roomId).emit('playback', payload);
   io.to(roomId).emit('room-updated', guestRoomInfo(db.getRoom(roomId)));
@@ -719,8 +739,8 @@ function onRoomUpdated(roomId) {
   const room = db.getRoom(roomId);
   if (!room) return;
   const live = getLive(roomId);
-  // если отключили зал ожидания — впускаем всех, кто ждёт
-  if (!room.settings.waitingRoom) {
+  // если отключили зал ожидания (или организатора нет и включён автовпуск) — впускаем всех, кто ждёт
+  if (!needsWaiting(room) && !room.settings.locked) {
     for (const id of [...live.waiting.keys()]) admitWaiting(roomId, id);
   }
   if (room.settings.locked) {
@@ -754,6 +774,7 @@ setInterval(() => {
     if (live.autoStartedFor === occ) continue;
     live.autoStartedFor = occ;
     live.scheduleKey = scheduleKey(pb);
+    persistPlay(room.id);
     if (live.play.status === 'playing' || live.play.status === 'paused') continue;
     const rec = db.getRecording(pb.recordingId);
     // если сервер был перезапущен после времени старта — продолжаем «с того места, где должны быть»
@@ -838,6 +859,11 @@ function removeParticipant(roomId, id, { keepRejoin = false } = {}) {
     if (keepRejoin && live.rejoin?.has(p.rejoin)) live.rejoin.get(p.rejoin).expires = Date.now() + REJOIN_TTL;
     else live.rejoin?.delete(p.rejoin);
     io.to(roomId).emit('peer-left', { id });
+    // организатор ушёл — тех, кто ждал в зале ожидания, впускаем сами (иначе их больше некому впустить)
+    const room = db.getRoom(roomId);
+    if (p.role === 'host' && room && !needsWaiting(room) && !room.settings.locked) {
+      for (const wid of [...live.waiting.keys()]) admitWaiting(roomId, wid);
+    }
   }
   notifyAdmins(roomId);
 }
@@ -897,7 +923,7 @@ io.on('connection', (socket) => {
       return cb({ status: 'joined' });
     }
     if (room.settings.locked) return cb({ error: 'Встреча закрыта организатором' });
-    if (room.settings.waitingRoom) {
+    if (needsWaiting(room)) {
       const live = getLive(roomId);
       live.waiting.set(socket.id, { id: socket.id, name, at: Date.now() });
       socket.data.roomId = roomId;
@@ -1074,6 +1100,8 @@ io.on('connection', (socket) => {
 
 process.on('uncaughtException', (err) => console.error('Необработанная ошибка:', err));
 process.on('unhandledRejection', (err) => console.error('Необработанная ошибка:', err));
+
+for (const room of db.listRooms()) if (db.getLiveState(room.id)) getLive(room.id);
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
