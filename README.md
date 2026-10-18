@@ -25,7 +25,21 @@
 - **Эмодзи:** Apple-эмодзи в реакциях и чате, нарисованный набор стикеров (`:fire:`, `:top:`, `:thanks:`…) и свои картинки каждого админа.
 - **Проверка микрофона и выбор устройств:** индикатор громкости перед входом, выбор микрофона, камеры и динамиков, понятные подсказки, если браузер не дал доступ.
 
-## Запуск на Windows (проще всего)
+## Установка на Windows Server (рекомендуется: видео через LiveKit)
+
+Ставит всё сам: Node.js, ffmpeg, медиасервер **LiveKit** (видео участников идёт через сервер — держит сотни зрителей), Caddy (HTTPS), службы с автозапуском и правила брандмауэра. Всё бесплатное.
+
+В PowerShell **от имени администратора**:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/konstahasan-cyber/conference-/claude/video-conference-recording-service-4y8f5m/deploy/windows/install.ps1 -OutFile $env:TEMP\install.ps1; & $env:TEMP\install.ps1"
+```
+
+Нужно, чтобы порты 80 и 443 были свободны, и открыть в панели хостинга (если там есть свой брандмауэр): **TCP 80, 443, 7881** и **UDP 443, 3478, 50000–50200**.
+
+Потом: `video update`, `video check`, `video logs`, `video diag`, `video help`.
+
+## Запуск на Windows локально для теста
 
 1. Скачайте проект: на GitHub нажмите **Code → Download ZIP** и распакуйте архив в любую папку, например `C:\Conference`.
 2. Дважды щёлкните **`start.bat`**. При первом запуске он:

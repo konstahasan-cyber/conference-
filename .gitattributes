@@ -1,1 +1,3 @@
 *.bat text eol=crlf
+# скрипты для Windows храним как есть: BOM и CRLF нужны Windows PowerShell 5.1 и cmd
+deploy/windows/** -text
