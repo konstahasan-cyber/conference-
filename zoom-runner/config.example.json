@@ -1,0 +1,11 @@
+{
+  "server": "http://127.0.0.1:3000",
+  "tokenFile": "C:\\conference\\data\\zoom-runner.token",
+  "obsUrl": "ws://127.0.0.1:4455",
+  "obsPassword": "пароль из OBS: Инструменты → Настройки сервера WebSocket",
+  "obsExe": "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe",
+  "zoomExe": null,
+  "leaveOnEnd": true,
+  "sceneName": "Автовебинар",
+  "inputName": "Запись"
+}

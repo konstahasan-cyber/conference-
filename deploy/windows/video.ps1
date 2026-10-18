@@ -2,8 +2,10 @@
   Быстрые команды для сервиса видеовстреч на Windows. Устанавливается в C:\conference\video.ps1,
   вызывается из любой консоли командой «video» (C:\Windows\video.cmd).
     video update | restart | stop | start | status | logs [app|livekit|caddy] | url
-          | password <новый> | check | diag [часы] | help
+          | password <новый> | check | diag [часы] | zoom [status|logs|restart] | help
   Обновление меняет только код приложения — Caddy, LiveKit и данные не трогаются.
+  В локальном режиме (config.json: mode = local, install.ps1 -Local) есть только служба app:
+  команды работают с ней, а video check не проверяет LiveKit, HTTPS, домен и брандмауэр.
 #>
 param(
   [Parameter(Position = 0)][string]$Command = 'help',
@@ -43,6 +45,16 @@ if ($Command -ne 'help' -and -not $me.IsInRole([Security.Principal.WindowsBuiltI
   Start-Process powershell.exe -Verb RunAs -ArgumentList $a
   exit
 }
+
+# ---------- Режим установки: local (только админка на этом компьютере + Zoom) или full (сайт) ----------
+$IsLocal = $false
+if (Test-Path $CfgPath) {
+  try {
+    $c0 = Get-Content -Raw -Encoding UTF8 $CfgPath | ConvertFrom-Json
+    if ([string]$c0.mode -eq 'local') { $IsLocal = $true }
+  } catch {}
+}
+if ($IsLocal) { $Services = @('app'); $StopOrder = @('app') } else { $StopOrder = @('caddy', 'app', 'livekit') }
 
 # ---------- Общие функции ----------
 function Get-Config {
@@ -101,11 +113,16 @@ function Show-LogTail([string]$Name, [int]$Lines = 30) {
   if (Test-Path $lf) { Get-Content -Encoding UTF8 -Tail $Lines $lf | ForEach-Object { Write-Host "  $_" } }
 }
 
+function Get-AdminUrl($Cfg) {
+  if ($IsLocal) { return "http://127.0.0.1:$($Cfg.port)/admin" }
+  return "https://$($Cfg.domain)/admin"
+}
+
 function Wait-Alive {
   $cfg = Get-Config
   for ($i = 0; $i -lt 30; $i++) {
     if (Test-Url "http://127.0.0.1:$($cfg.port)/api/me" '' 3) {
-      Ok "Сервис работает: https://$($cfg.domain)/admin"
+      Ok "Сервис работает: $(Get-AdminUrl $cfg)"
       return
     }
     Start-Sleep -Seconds 1
@@ -246,6 +263,7 @@ function Invoke-Check {
   if (-not $lkPort) { $lkPort = 7880 }
 
   Write-Host 'Диагностика сервиса видеовстреч'
+  if ($IsLocal) { Write-Host 'Режим: локальный (только админ-панель на этом компьютере; LiveKit, HTTPS и брандмауэр не проверяются)' }
   Write-Host '--- Службы ---'
   foreach ($s in $Services) {
     $t = Get-ScheduledTask -TaskName "conference-$s" -ErrorAction SilentlyContinue
@@ -254,67 +272,83 @@ function Invoke-Check {
     else { Bad "conference-$s не запущен (video start, video logs $s)" }
   }
 
-  Write-Host '--- Приложение и LiveKit ---'
+  if ($IsLocal) { Write-Host '--- Приложение ---' } else { Write-Host '--- Приложение и LiveKit ---' }
   if (Test-Url "http://127.0.0.1:$port/api/me" '' 5) { Good "Приложение отвечает на http://127.0.0.1:$port/api/me" }
   else { Bad "Приложение не отвечает на http://127.0.0.1:$port/api/me (video logs)" }
-  if (Test-Url "http://127.0.0.1:$lkPort/" 'OK' 5) { Good "LiveKit отвечает на http://127.0.0.1:$lkPort" }
-  else { Bad "LiveKit не отвечает на http://127.0.0.1:$lkPort (video logs livekit)" }
-
-  Write-Host '--- Сайт из интернета ---'
-  $pubIp = ''
-  try { $pubIp = ([string](Invoke-RestMethod -Uri 'https://api.ipify.org' -UseBasicParsing -TimeoutSec 8)).Trim() } catch {}
-  if (-not $domain) {
-    Bad "domain не задан в $CfgPath"
+  if ($IsLocal) {
+    Write-Host '--- Порт приложения ---'
+    $l = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+    if ($l.Count -eq 0) { Bad "Порт $port/TCP не слушается (app)" }
+    else {
+      $ours = $false
+      foreach ($c in $l) {
+        $pr = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
+        if ($pr -and $pr.ExecutablePath -ieq (Get-ServiceExe 'app')) { $ours = $true }
+      }
+      if ($ours) { Good "Порт $port/TCP слушает app" }
+      else { Bad "Порт $port/TCP занят другой программой (PID $($l[0].OwningProcess)), а не app" }
+    }
+    Info "Админ-панель: http://127.0.0.1:$port/admin (только на этом компьютере)"
   } else {
-    try {
-      $ips = @(Resolve-DnsName -Name $domain -Type A -DnsOnly -ErrorAction Stop | Where-Object { $_.IPAddress } | ForEach-Object { $_.IPAddress })
-      if (-not $pubIp) { Info "DNS: $domain -> $($ips -join ', ') (внешний IP узнать не удалось)" }
-      elseif ($ips -contains $pubIp) { Good "DNS: $domain указывает на этот сервер ($pubIp)" }
-      else { Bad "DNS: $domain указывает на $($ips -join ', '), а IP сервера $pubIp — исправьте A-запись" }
-    } catch { Bad "DNS: домен $domain не найден — проверьте A-запись" }
-    if (Test-Url "https://$domain/api/me" '' 10) { Good "Сайт доступен по HTTPS: https://$domain" }
-    else { Bad "https://$domain/api/me не отвечает (Caddy, DNS, сертификат или порты 80/443 — video logs caddy)" }
-    if ($domain -like '*.sslip.io' -or $domain -like '*.nip.io') {
-      Write-Host "⚠  Адрес $domain — временный бесплатный. Его иногда блокируют антивирусы," -ForegroundColor Yellow
-      Write-Host '   корпоративные сети и некоторые провайдеры — у части людей сайт просто не откроется.' -ForegroundColor Yellow
-      Write-Host "   Лучше купить свой домен (от ~200 ₽/год) и перенастроить:" -ForegroundColor Yellow
-      Write-Host "   powershell -ExecutionPolicy Bypass -File $AppDir\deploy\windows\install.ps1 -Domain ваш.домен" -ForegroundColor Yellow
-    }
-  }
+    if (Test-Url "http://127.0.0.1:$lkPort/" 'OK' 5) { Good "LiveKit отвечает на http://127.0.0.1:$lkPort" }
+    else { Bad "LiveKit не отвечает на http://127.0.0.1:$lkPort (video logs livekit)" }
 
-  Write-Host '--- Порты ---'
-  $tcpWant = @(@{ P = 80; S = 'caddy' }, @{ P = 443; S = 'caddy' }, @{ P = 7881; S = 'livekit' }, @{ P = $lkPort; S = 'livekit' }, @{ P = $port; S = 'app' })
-  foreach ($w in $tcpWant) {
-    $l = @(Get-NetTCPConnection -State Listen -LocalPort $w.P -ErrorAction SilentlyContinue)
-    if ($l.Count -eq 0) { Bad "Порт $($w.P)/TCP не слушается ($($w.S))"; continue }
-    $exe = Get-ServiceExe $w.S
-    $ours = $false
-    foreach ($c in $l) {
-      $pr = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
-      if ($pr -and $pr.ExecutablePath -ieq $exe) { $ours = $true }
+    Write-Host '--- Сайт из интернета ---'
+    $pubIp = ''
+    try { $pubIp = ([string](Invoke-RestMethod -Uri 'https://api.ipify.org' -UseBasicParsing -TimeoutSec 8)).Trim() } catch {}
+    if (-not $domain) {
+      Bad "domain не задан в $CfgPath"
+    } else {
+      try {
+        $ips = @(Resolve-DnsName -Name $domain -Type A -DnsOnly -ErrorAction Stop | Where-Object { $_.IPAddress } | ForEach-Object { $_.IPAddress })
+        if (-not $pubIp) { Info "DNS: $domain -> $($ips -join ', ') (внешний IP узнать не удалось)" }
+        elseif ($ips -contains $pubIp) { Good "DNS: $domain указывает на этот сервер ($pubIp)" }
+        else { Bad "DNS: $domain указывает на $($ips -join ', '), а IP сервера $pubIp — исправьте A-запись" }
+      } catch { Bad "DNS: домен $domain не найден — проверьте A-запись" }
+      if (Test-Url "https://$domain/api/me" '' 10) { Good "Сайт доступен по HTTPS: https://$domain" }
+      else { Bad "https://$domain/api/me не отвечает (Caddy, DNS, сертификат или порты 80/443 — video logs caddy)" }
+      if ($domain -like '*.sslip.io' -or $domain -like '*.nip.io') {
+        Write-Host "⚠  Адрес $domain — временный бесплатный. Его иногда блокируют антивирусы," -ForegroundColor Yellow
+        Write-Host '   корпоративные сети и некоторые провайдеры — у части людей сайт просто не откроется.' -ForegroundColor Yellow
+        Write-Host "   Лучше купить свой домен (от ~200 ₽/год) и перенастроить:" -ForegroundColor Yellow
+        Write-Host "   powershell -ExecutionPolicy Bypass -File $AppDir\deploy\windows\install.ps1 -Domain ваш.домен" -ForegroundColor Yellow
+      }
     }
-    if ($ours) { Good "Порт $($w.P)/TCP слушает $($w.S)" }
-    else { Bad "Порт $($w.P)/TCP занят другой программой (PID $($l[0].OwningProcess)), а не $($w.S)" }
-  }
-  if (@(Get-NetUDPEndpoint -LocalPort 3478 -ErrorAction SilentlyContinue).Count -gt 0) { Good 'Порт 3478/UDP (TURN) слушается' }
-  else { Bad 'Порт 3478/UDP (TURN) не слушается (video logs livekit)' }
-  Info 'Порты UDP 50000-50200 открываются LiveKit по мере подключения участников.'
 
-  Write-Host '--- Брандмауэр Windows ---'
-  $want = @(
-    @{ Proto = 'TCP'; Port = '80' }, @{ Proto = 'TCP'; Port = '443' }, @{ Proto = 'UDP'; Port = '443' },
-    @{ Proto = 'TCP'; Port = '7881' }, @{ Proto = 'UDP'; Port = '3478' }, @{ Proto = 'UDP'; Port = '50000-50200' }
-  )
-  $rules = @(Get-NetFirewallRule -DisplayName 'Conference*' -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' })
-  $filters = @()
-  foreach ($r in $rules) { $filters += ($r | Get-NetFirewallPortFilter) }
-  foreach ($w in $want) {
-    $hit = $filters | Where-Object { $_.Protocol -eq $w.Proto -and (@($_.LocalPort) -contains $w.Port) }
-    if ($hit) { Good "Правило брандмауэра: $($w.Proto) $($w.Port) открыт" }
-    else { Bad "Правило брандмауэра: $($w.Proto) $($w.Port) не открыт (переустановите: install.ps1)" }
+    Write-Host '--- Порты ---'
+    $tcpWant = @(@{ P = 80; S = 'caddy' }, @{ P = 443; S = 'caddy' }, @{ P = 7881; S = 'livekit' }, @{ P = $lkPort; S = 'livekit' }, @{ P = $port; S = 'app' })
+    foreach ($w in $tcpWant) {
+      $l = @(Get-NetTCPConnection -State Listen -LocalPort $w.P -ErrorAction SilentlyContinue)
+      if ($l.Count -eq 0) { Bad "Порт $($w.P)/TCP не слушается ($($w.S))"; continue }
+      $exe = Get-ServiceExe $w.S
+      $ours = $false
+      foreach ($c in $l) {
+        $pr = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
+        if ($pr -and $pr.ExecutablePath -ieq $exe) { $ours = $true }
+      }
+      if ($ours) { Good "Порт $($w.P)/TCP слушает $($w.S)" }
+      else { Bad "Порт $($w.P)/TCP занят другой программой (PID $($l[0].OwningProcess)), а не $($w.S)" }
+    }
+    if (@(Get-NetUDPEndpoint -LocalPort 3478 -ErrorAction SilentlyContinue).Count -gt 0) { Good 'Порт 3478/UDP (TURN) слушается' }
+    else { Bad 'Порт 3478/UDP (TURN) не слушается (video logs livekit)' }
+    Info 'Порты UDP 50000-50200 открываются LiveKit по мере подключения участников.'
+
+    Write-Host '--- Брандмауэр Windows ---'
+    $want = @(
+      @{ Proto = 'TCP'; Port = '80' }, @{ Proto = 'TCP'; Port = '443' }, @{ Proto = 'UDP'; Port = '443' },
+      @{ Proto = 'TCP'; Port = '7881' }, @{ Proto = 'UDP'; Port = '3478' }, @{ Proto = 'UDP'; Port = '50000-50200' }
+    )
+    $rules = @(Get-NetFirewallRule -DisplayName 'Conference*' -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' })
+    $filters = @()
+    foreach ($r in $rules) { $filters += ($r | Get-NetFirewallPortFilter) }
+    foreach ($w in $want) {
+      $hit = $filters | Where-Object { $_.Protocol -eq $w.Proto -and (@($_.LocalPort) -contains $w.Port) }
+      if ($hit) { Good "Правило брандмауэра: $($w.Proto) $($w.Port) открыт" }
+      else { Bad "Правило брандмауэра: $($w.Proto) $($w.Port) не открыт (переустановите: install.ps1)" }
+    }
+    $profiles = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' })
+    if ($profiles.Count -eq 0) { Info 'Брандмауэр Windows выключен — локально ничего не мешает.' }
   }
-  $profiles = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' })
-  if ($profiles.Count -eq 0) { Info 'Брандмауэр Windows выключен — локально ничего не мешает.' }
 
   Write-Host '--- Диск и записи ---'
   if (Test-Path $DataDir) {
@@ -339,13 +373,15 @@ function Invoke-Check {
   Write-Host ''
   if ($script:Fail -eq 0) { Ok "Всё в порядке: $($script:Pass) проверок пройдено." }
   else { Write-Host "Проблем: $($script:Fail) (пройдено: $($script:Pass))." -ForegroundColor Red }
-  Write-Host @'
+  if (-not $IsLocal) {
+    Write-Host @'
 Подсказка: если участники не видят/не слышат друг друга — откройте в панели хостера
 (раздел «Firewall»/«Брандмауэр»/«Сетевой экран») входящие порты:
   TCP 80, 443, 7881;  UDP 443, 3478, 50000-50200.
 Проверка с самого сервера может пройти, даже когда внешний фаервол закрыт: проверьте
 с другого компьютера, например https://livekit.io/connection-test (адрес wss://ваш-домен).
 '@
+  }
   if ($script:Fail -ne 0) { exit 1 }
 }
 
@@ -375,17 +411,78 @@ function Show-Diag {
   Write-Host 'media-error — нет доступа к камере/микрофону на стороне участника.'
 }
 
+# ---------- video zoom ----------
+$ZoomTask = 'conference-zoom-runner'
+function Invoke-Zoom {
+  $sub = 'status'
+  if ($Arg) { $sub = $Arg.ToLower() }
+  $lf = Join-Path $LogDir 'zoom-runner.log'
+  switch ($sub) {
+    'status' {
+      $t = Get-ScheduledTask -TaskName $ZoomTask -ErrorAction SilentlyContinue
+      if (-not $t) {
+        Write-Host "❌ Задача $ZoomTask не найдена — выполните zoom-setup.ps1 в RDP-сессии пользователя Zoom" -ForegroundColor Red
+      } else {
+        $user = [string]$t.Principal.UserId
+        $last = ''
+        try {
+          $ti = Get-ScheduledTaskInfo -TaskName $ZoomTask
+          if ($ti.LastRunTime) { $last = ", последний запуск $($ti.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss')) (код $($ti.LastTaskResult))" }
+        } catch {}
+        $color = 'Red'
+        if ([string]$t.State -eq 'Running') { $color = 'Green' }
+        Write-Host "Задача $ZoomTask`: $($t.State), пользователь $user$last" -ForegroundColor $color
+      }
+      $runner = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and ($_.CommandLine -like '*zoom-runner*runner.js*') })
+      $obs  = @(Get-Process -Name 'obs64' -ErrorAction SilentlyContinue)
+      $zoom = @(Get-Process -Name 'Zoom' -ErrorAction SilentlyContinue)
+      foreach ($x in @(@{ N = 'zoom-runner'; P = $runner; Id = 'ProcessId' }, @{ N = 'OBS Studio '; P = $obs; Id = 'Id' }, @{ N = 'Zoom       '; P = $zoom; Id = 'Id' })) {
+        if ($x.P.Count -gt 0) {
+          $ids = ($x.P | ForEach-Object { $_.($x.Id) }) -join ', '
+          Write-Host "✅ $($x.N) запущен (PID $ids)" -ForegroundColor Green
+        } else {
+          Write-Host "❌ $($x.N) не запущен" -ForegroundColor Red
+        }
+      }
+      Write-Host "--- Последние строки $lf ---"
+      if (Test-Path $lf) { Show-LogTail 'zoom-runner' 20 } else { Write-Host '  (лог ещё не создан)' }
+    }
+    'logs' {
+      if (-not (Test-Path $lf)) { Die "лог $lf ещё не создан" }
+      Write-Host "Лог $lf (выход: Ctrl+C)" -ForegroundColor DarkGray
+      Get-Content -Path $lf -Encoding UTF8 -Tail 50 -Wait
+    }
+    'restart' {
+      if (-not (Get-ScheduledTask -TaskName $ZoomTask -ErrorAction SilentlyContinue)) {
+        Die "задача $ZoomTask не найдена — выполните zoom-setup.ps1 в RDP-сессии пользователя Zoom"
+      }
+      Stop-ScheduledTask -TaskName $ZoomTask -ErrorAction SilentlyContinue
+      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and (($_.CommandLine -like '*run-zoom-runner.ps1*') -or ($_.Name -ieq 'node.exe' -and $_.CommandLine -like '*zoom-runner*runner.js*')) } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+      Start-Sleep -Seconds 2
+      Start-ScheduledTask -TaskName $ZoomTask
+      Start-Sleep -Seconds 3
+      $t = Get-ScheduledTask -TaskName $ZoomTask
+      if ([string]$t.State -eq 'Running') { Ok "zoom-runner перезапущен. Лог: video zoom logs" }
+      else { Warn "Задача $ZoomTask в состоянии $($t.State) — пользователь $($t.Principal.UserId) должен быть в системе (войдите по RDP)" }
+    }
+    default { Die 'укажите status, logs или restart: video zoom status' }
+  }
+}
+
 # ---------- Команды ----------
 switch ($Command) {
   'update'  { Invoke-Update }
   'restart' {
-    foreach ($s in @('caddy', 'app', 'livekit')) { Stop-ConfService $s }
+    foreach ($s in $StopOrder) { Stop-ConfService $s }
     foreach ($s in $Services) { Start-ConfService $s }
     Wait-Alive
   }
   'start'   { foreach ($s in $Services) { Start-ConfService $s }; Wait-Alive }
   'stop'    {
-    foreach ($s in @('caddy', 'app', 'livekit')) { Stop-ConfService $s }
+    foreach ($s in $StopOrder) { Stop-ConfService $s }
     Ok 'Сервис остановлен. Запустить: video start'
   }
   'status'  { Show-Status }
@@ -393,17 +490,25 @@ switch ($Command) {
   'logs'    {
     $name = 'app'
     if ($Arg) { $name = $Arg.ToLower() }
-    if ($Services -notcontains $name) { Die 'укажите app, livekit или caddy: video logs livekit' }
+    if ($Services -notcontains $name) {
+      if ($IsLocal) { Die 'в локальном режиме есть только лог приложения: video logs (лог Zoom: video zoom logs)' }
+      Die 'укажите app, livekit или caddy: video logs livekit'
+    }
     $lf = Join-Path $LogDir "$name.log"
     if (-not (Test-Path $lf)) { Die "лог $lf ещё не создан" }
     Write-Host "Лог $lf (выход: Ctrl+C)" -ForegroundColor DarkGray
     Get-Content -Path $lf -Encoding UTF8 -Tail 50 -Wait
   }
   'diag'    { Show-Diag }
+  'zoom'    { Invoke-Zoom }
   'url'     {
     $cfg = Get-Config
-    Write-Host "Сайт:         https://$($cfg.domain)"
-    Write-Host "Админ-панель: https://$($cfg.domain)/admin"
+    if ($IsLocal) {
+      Write-Host "Админ-панель: $(Get-AdminUrl $cfg)  (только на этом компьютере, логин admin)"
+    } else {
+      Write-Host "Сайт:         https://$($cfg.domain)"
+      Write-Host "Админ-панель: $(Get-AdminUrl $cfg)"
+    }
   }
   'password' {
     $new = $Arg
@@ -435,6 +540,9 @@ switch ($Command) {
   video url               — показать адрес сайта и админки
   video password          — сменить пароль админки (video password НовыйПароль)
   video check             — диагностика: сайт, LiveKit, порты, брандмауэр, диск, ffmpeg
+  video zoom status       — Zoom-автовебинар: задача, процессы OBS/Zoom, последние строки лога
+  video zoom logs         — лог zoom-runner в реальном времени (выход: Ctrl+C)
+  video zoom restart      — перезапустить zoom-runner
 Файлы: C:\conference (настройки config.json, данные data\, логи logs\)
 '@
   }

@@ -69,6 +69,41 @@ function pbPosition() {
   return p.position + (p.status === 'playing' ? (performance.now() - pbRecv) / 1000 : 0);
 }
 
+// ---------- Показ в Zoom ----------
+let zoomFilled = false;
+async function saveZoom(patch) {
+  try {
+    await api(`/api/rooms/${roomId}`, { method: 'PUT', body: { zoom: patch } });
+    toast('Сохранено');
+  } catch (e) { toast(e.message); }
+}
+$('#zoomSave').onclick = () => saveZoom({ link: $('#zoomLink').value });
+$('#zoomEnabled').onchange = () => {
+  if ($('#zoomEnabled').checked && !$('#zoomLink').value.trim()) toast('Вставьте ссылку-приглашение Zoom');
+  saveZoom({ enabled: $('#zoomEnabled').checked, link: $('#zoomLink').value });
+};
+
+$('#zoomTest').onclick = () => emit('admin:zoom-test', { on: !state?.zoomTest });
+
+function renderZoom() {
+  const z = state.room.zoom || { enabled: false, link: '' };
+  if (!zoomFilled) { $('#zoomLink').value = z.link || ''; zoomFilled = true; }
+  $('#zoomEnabled').checked = !!z.enabled;
+  $('#zoomTest').innerHTML = state.zoomTest ? `${ic('square')}Закончить тест` : `${ic('play')}Тест без входа в Zoom`;
+  $('#zoomTestHint').textContent = state.zoomTest ? 'Тест: запись идёт в OBS, в Zoom пульт не заходит. Смотрите окно OBS на сервере.' : '';
+  const r = state.zoomRunner || { online: false };
+  const yes = (b) => (b ? '✅' : '❌');
+  $('#zrBadge').className = 'badge ' + (r.online ? (r.state === 'error' ? 'live' : 'ok') : 'warn');
+  $('#zrBadge').textContent = r.online ? `пульт: ${({ idle: 'ждёт', starting: 'запускает', playing: 'в эфире', paused: 'пауза', ending: 'выходит', error: 'ошибка' })[r.state] || r.state}` : 'пульт не подключён';
+  $('#zrStatus').innerHTML = !r.online
+    ? '<span class="muted">Zoom-пульт не отвечает. На сервере: войдите по RDP под пользователем с Zoom и выполните <code>video zoom status</code>.</span>'
+    : `${r.message ? `<div style="margin-bottom:6px">${esc(r.message)}</div>` : ''}<div class="row muted" style="gap:14px">
+        <span>${yes(r.obs?.connected)} OBS</span><span>${yes(r.obs?.virtualCam)} виртуальная камера</span>
+        <span>${yes(/cable/i.test(r.obs?.monitorDevice || ''))} звук в Zoom (CABLE)</span>
+        <span>${yes(r.zoom?.inMeeting)} во встрече Zoom</span>
+        ${r.media?.cursor != null ? `<span>⏱ ${fmtTime(r.media.cursor)}</span>` : ''}</div>`;
+}
+
 function render() {
   const { room, playback } = state;
   $('#roomTitle').textContent = room.name;
@@ -80,6 +115,7 @@ function render() {
   }
   $$('[data-set]').forEach((el) => (el.checked = !!room.settings[el.dataset.set]));
   renderControls($('#controls'), state, socket);
+  renderZoom();
   if (!formFilled) fillPlaybackForm();
   if (!$('#chatAs').value) $('#chatAs').value = room.playback.presenterName || 'Организатор';
   $('#schedInfo').innerHTML = `${ic('clock', 'sm')} ${scheduleText(room.playback, room.nextStart)}`;

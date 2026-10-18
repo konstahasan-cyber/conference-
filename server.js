@@ -417,6 +417,77 @@ app.delete('/api/recordings/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Zoom-пульт (zoom-runner) ----------
+// Программа на этом же сервере в сеансе пользователя: по этим данным запускает запись в OBS
+// (виртуальная камера + VB-CABLE) и заходит в Zoom-встречу. Доступ — по токену из файла в папке данных.
+const ZOOM_TOKEN_FILE = path.join(path.dirname(db.UPLOAD_DIR), 'zoom-runner.token');
+if (!fs.existsSync(ZOOM_TOKEN_FILE)) fs.writeFileSync(ZOOM_TOKEN_FILE, crypto.randomBytes(24).toString('hex'), { mode: 0o600 });
+const ZOOM_TOKEN = fs.readFileSync(ZOOM_TOKEN_FILE, 'utf8').trim();
+let zoomRunner = null; // последний отчёт пульта
+const zoomTests = new Set(); // встречи в режиме «тест»: запись идёт в OBS, в Zoom не заходим
+
+function zoomRunnerView() {
+  if (!zoomRunner) return { online: false };
+  return { ...zoomRunner, online: Date.now() - zoomRunner.at < 15_000 };
+}
+
+function requireRunner(req, res, next) {
+  const t = String(req.headers['x-runner-token'] || '');
+  if (t.length === ZOOM_TOKEN.length && crypto.timingSafeEqual(Buffer.from(t), Buffer.from(ZOOM_TOKEN))) return next();
+  res.sendStatus(401);
+}
+
+// какую запись сейчас показывать в Zoom: самая свежая идущая трансляция среди встреч с включённым Zoom
+function currentZoomJob() {
+  let best = null;
+  for (const room of db.listRooms()) {
+    const test = zoomTests.has(room.id);
+    if (!test && (!room.zoom?.enabled || !room.zoom.link)) continue;
+    const live = lives.get(room.id);
+    const play = live?.play;
+    if (!play || !['playing', 'paused', 'ended'].includes(play.status)) continue;
+    const rec = db.getRecording(play.recordingId);
+    if (!rec) continue;
+    if (play.status === 'ended' && Date.now() - (play.endedAt || 0) > 120_000) continue;
+    if (!best || (play.startedAt || 0) > (best.play.startedAt || 0)) best = { room, play, rec, test };
+  }
+  if (!best) return null;
+  const { room, play, rec, test } = best;
+  return {
+    key: `${room.id}:${play.id || play.recordingId}`,
+    roomId: room.id,
+    roomName: room.name,
+    link: room.zoom?.link || '',
+    noJoin: test || !room.zoom?.link,
+    name: room.playback.presenterName,
+    status: play.status,
+    file: path.join(db.UPLOAD_DIR, rec.file), // OBS открывает и MP4, и WebM
+    position: playbackPosition(play),
+    duration: rec.duration || null,
+  };
+}
+
+app.get('/api/zoom/poll', requireRunner, (req, res) => res.json({ now: Date.now(), job: currentZoomJob() }));
+
+app.post('/api/zoom/report', requireRunner, (req, res) => {
+  res.sendStatus(204);
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  const prevMsg = zoomRunner?.message;
+  zoomRunner = {
+    at: Date.now(),
+    version: str(b.version),
+    state: str(b.state),
+    message: str(b.message).slice(0, 300),
+    obs: { connected: !!b.obs?.connected, virtualCam: !!b.obs?.virtualCam, monitorDevice: typeof b.obs?.monitorDevice === 'string' ? b.obs.monitorDevice.slice(0, 120) : null },
+    zoom: { running: !!b.zoom?.running, inMeeting: !!b.zoom?.inMeeting },
+    media: { state: str(b.media?.state), cursor: Number(b.media?.cursor) || null, duration: Number(b.media?.duration) || null },
+    job: str(b.job),
+  };
+  if (zoomRunner.message && zoomRunner.message !== prevMsg) console.log(`ZOOM ${zoomRunner.state}: ${zoomRunner.message}`);
+  // пульты встреч с Zoom обновляем, чтобы статус был живым
+  for (const room of db.listRooms()) if (room.zoom?.enabled || zoomTests.has(room.id)) notifyAdmins(room.id);
+});
+
 // ---------- Диагностика ----------
 // Браузеры участников сообщают о проблемах (видео не грузится, обрыв соединения, нет доступа к камере).
 // Смотреть: video diag (или journalctl -u conference | grep DIAG)
@@ -675,6 +746,8 @@ function adminState(roomId) {
     participants: [...live.participants.values()].map((p) => publicParticipant(room, p)),
     playback: playbackPayload(roomId),
     chat: live.chat,
+    zoomRunner: zoomRunnerView(),
+    zoomTest: zoomTests.has(roomId),
   };
 }
 
@@ -707,7 +780,7 @@ function startPlayback(roomId, recordingId, { startedAt = Date.now(), position =
   if (!room || !rec || rec.ownerId !== room.ownerId) return false;
   const live = getLive(roomId);
   clearTimeout(live.firstGuestTimer);
-  live.play = { status: 'playing', recordingId: recId, position, startedAt };
+  live.play = { status: 'playing', recordingId: recId, position, startedAt, id: crypto.randomBytes(6).toString('hex') };
   scheduleEnd(roomId);
   broadcastPlayback(roomId);
   return true;
@@ -745,6 +818,7 @@ function stopPlayback(roomId) {
   clearTimeout(live.endTimer);
   clearTimeout(live.firstGuestTimer);
   live.play = { status: 'idle', recordingId: null, position: 0, startedAt: 0 };
+  zoomTests.delete(roomId);
   broadcastPlayback(roomId);
 }
 
@@ -754,6 +828,7 @@ function finishPlayback(roomId) {
   clearTimeout(live.endTimer);
   live.play.position = playbackPosition(live.play);
   live.play.status = 'ended';
+  live.play.endedAt = Date.now();
   broadcastPlayback(roomId);
   const room = db.getRoom(roomId);
   if (room?.playback.endAction === 'endMeeting') {
@@ -1051,8 +1126,8 @@ io.on('connection', (socket) => {
     const room = db.getRoom(args.roomId);
     if (!room) return reply({ error: 'Комната не найдена' });
     if (!socket.data.user || socket.data.user.id !== room.ownerId) return reply({ error: 'Нет доступа' });
-    handler(room, args);
-    reply({ ok: true });
+    const r = handler(room, args);
+    reply(r && r.error ? r : { ok: true });
   });
 
   adminOn('admin:watch', (room) => {
@@ -1130,6 +1205,19 @@ io.on('connection', (socket) => {
     else if (action === 'resume') resumePlayback(room.id);
     else if (action === 'seek') seekPlayback(room.id, position);
     else if (action === 'stop') stopPlayback(room.id);
+  });
+
+  // тест Zoom-пульта: запись запускается только в OBS, в Zoom-встречу пульт не заходит
+  adminOn('admin:zoom-test', (room, { on }) => {
+    if (on) {
+      zoomTests.add(room.id);
+      const st = getLive(room.id).play.status;
+      if (!['playing', 'paused'].includes(st) && !startPlayback(room.id)) {
+        zoomTests.delete(room.id);
+        return { error: 'Выберите запись в «Показ записи» и сохраните' };
+      }
+    } else zoomTests.delete(room.id);
+    notifyAdmins(room.id);
   });
 
   adminOn('admin:chat', (room, { text, as }) => {

@@ -18,12 +18,18 @@
     -Domain meet.example.ru     сменить/задать домен
     -AdminPassword secret       задать пароль админки
     -UpdateTools                заново скачать Node.js, ffmpeg, Caddy и LiveKit
+    -Local                      локальный режим (только Zoom-автовебинар): без сайта, HTTPS и LiveKit —
+                                админ-панель открывается только на этом компьютере (http://127.0.0.1:порт/admin).
+                                Уже установленный сайт (с доменом) этот ключ не трогает.
+    -Full                       перевести локальную установку в полноценный сайт (спросит домен)
 #>
 [CmdletBinding()]
 param(
   [string]$Domain = $env:DOMAIN,
   [string]$AdminPassword = $env:ADMIN_PASSWORD,
-  [switch]$UpdateTools
+  [switch]$UpdateTools,
+  [switch]$Local,
+  [switch]$Full
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +67,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     $a = "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$PSCommandPath`""
     if ($Domain) { $a += " -Domain `"$Domain`"" }
     if ($UpdateTools) { $a += ' -UpdateTools' }
+    if ($Local) { $a += ' -Local' }
+    if ($Full) { $a += ' -Full' }
     Start-Process powershell.exe -Verb RunAs -ArgumentList $a
     exit
   }
@@ -225,15 +233,6 @@ function Save-Config($Cfg) {
 # ---------- Подготовка ----------
 foreach ($d in @($Root, $Bin, $DataDir, $LogDir, $TmpDir)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 
-Say 'Определяю внешний IP'
-$PublicIp = ''
-foreach ($u in @('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com')) {
-  try { $PublicIp = ([string](Invoke-RestMethod -Uri $u -UseBasicParsing -TimeoutSec 10)).Trim() } catch {}
-  if ($PublicIp -match '^\d+\.\d+\.\d+\.\d+$') { break } else { $PublicIp = '' }
-}
-if (-not $PublicIp) { Die 'не удалось определить внешний IP сервера (нет доступа в интернет?)' }
-Write-Host "IP: $PublicIp"
-
 # ---------- Сохранённые настройки ----------
 $cfg = $null
 $FirstInstall = $true
@@ -247,55 +246,94 @@ function Set-Cfg([string]$k, $v) {
 }
 if (-not $FirstInstall) { Write-Host "Найдены прежние настройки: $CfgPath — использую их." }
 
+# ---------- Режим: full (сайт с HTTPS и LiveKit) или local (только админка на этом компьютере + Zoom) ----------
+$PrevMode = [string](Get-Cfg 'mode')
+$PrevDomain = [string](Get-Cfg 'domain')
+if ($Full) {
+  $Mode = 'full'
+} elseif ($PrevMode -eq 'local') {
+  $Mode = 'local'
+} elseif ($Local) {
+  if ($FirstInstall -or -not $PrevDomain) {
+    $Mode = 'local'
+  } else {
+    $Mode = 'full'
+    Warn "Уже установлен сайт https://$PrevDomain — оставляю его как есть (ключ -Local не применяется к существующему сайту)."
+  }
+} else {
+  $Mode = 'full'
+}
+$IsLocal = ($Mode -eq 'local')
+if ($IsLocal) {
+  $Services = @('app')
+  if ($Domain) { Warn 'Ключ -Domain в локальном режиме не используется (сделать сайт: install.ps1 -Full).' }
+  Write-Host 'Режим: локальный (админ-панель только на этом компьютере, без сайта в интернете).'
+} else {
+  if ($PrevMode -eq 'local') { Write-Host 'Перевожу локальную установку в полноценный сайт (HTTPS, LiveKit).' }
+  Write-Host 'Режим: сайт (HTTPS, LiveKit).'
+}
+
 # ---------- Останавливаем свои службы (чтобы не мешали проверке портов и обновлению файлов) ----------
 Say 'Останавливаю прежнюю версию (если есть)'
-foreach ($s in @('caddy', 'app', 'livekit')) { Stop-ConfService $s }
+if ($IsLocal) { $StopList = @('app') } else { $StopList = @('caddy', 'app', 'livekit') }
+foreach ($s in $StopList) { Stop-ConfService $s }
 
-# ---------- Порты 80/443 должны быть свободны ----------
-Say 'Проверяю порты'
-$busy = Get-TcpListeners @(80, 443)
-if ($busy.Count -gt 0) {
-  Write-Host ''
-  Write-Host 'Порты 80/443 заняты другой программой:' -ForegroundColor Red
-  foreach ($l in ($busy | Sort-Object LocalPort, OwningProcess -Unique)) {
-    Write-Host ("  порт {0}: {1}" -f $l.LocalPort, (Get-ProcDescription $l.OwningProcess)) -ForegroundColor Red
+if (-not $IsLocal) {
+  Say 'Определяю внешний IP'
+  $PublicIp = ''
+  foreach ($u in @('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com')) {
+    try { $PublicIp = ([string](Invoke-RestMethod -Uri $u -UseBasicParsing -TimeoutSec 10)).Trim() } catch {}
+    if ($PublicIp -match '^\d+\.\d+\.\d+\.\d+$') { break } else { $PublicIp = '' }
   }
-  Write-Host ''
-  Write-Host 'Сервису видеовстреч нужны порты 80 и 443 для HTTPS (сертификат Let''s Encrypt).'
-  Write-Host 'Я ничего не останавливаю сам. Освободите порты (например, отключите сайт по умолчанию в IIS:'
-  Write-Host '  Stop-Service W3SVC; Set-Service W3SVC -StartupType Disabled' -ForegroundColor Yellow
-  Write-Host 'если IIS не нужен) и запустите установку снова.'
-  exit 1
-}
-foreach ($pp in @($LiveKitPort, 7881)) {
-  $l = Get-TcpListeners @($pp)
-  if ($l.Count -gt 0) { Die ("порт {0}/TCP нужен LiveKit, но занят: {1}" -f $pp, (Get-ProcDescription $l[0].OwningProcess)) }
-}
-$l = Get-UdpListeners @(3478)
-if ($l.Count -gt 0) { Die ("порт 3478/UDP нужен LiveKit (TURN), но занят: {0}" -f (Get-ProcDescription $l[0].OwningProcess)) }
-Ok 'Порты 80, 443, 7880, 7881, 3478 свободны.'
+  if (-not $PublicIp) { Die 'не удалось определить внешний IP сервера (нет доступа в интернет?)' }
+  Write-Host "IP: $PublicIp"
 
-# ---------- Домен ----------
-if (-not $Domain) { $Domain = Get-Cfg 'domain' }
-if (-not $Domain) {
-  $DefaultDomain = ($PublicIp -replace '\.', '-') + '.sslip.io'
-  Write-Host ''
-  Write-Host "Укажите домен или поддомен, направленный (A-запись) на IP $PublicIp, например meet.mysite.ru"
-  Write-Host "Если домена нет — нажмите Enter, будет бесплатный адрес $DefaultDomain"
-  Write-Host '(свой домен лучше: адреса *.sslip.io иногда блокируют антивирусы и корпоративные сети)' -ForegroundColor DarkGray
-  $Domain = (Read-Host 'Домен').Trim()
-  if (-not $Domain) { $Domain = $DefaultDomain }
-}
-$Domain = ($Domain.Trim() -replace '^https?://', '' -replace '/.*$', '').ToLower()
-if ($Domain -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$') { Die "неверный домен: $Domain" }
-Write-Host "Домен: $Domain"
-try {
-  $ips = @(Resolve-DnsName -Name $Domain -Type A -DnsOnly -ErrorAction Stop | Where-Object { $_.IPAddress } | ForEach-Object { $_.IPAddress })
-  if ($ips -notcontains $PublicIp) {
-    Warn "Внимание: $Domain указывает на $($ips -join ', '), а IP этого сервера $PublicIp. HTTPS-сертификат не выпустится, пока A-запись не исправлена."
+  # ---------- Порты 80/443 должны быть свободны ----------
+  Say 'Проверяю порты'
+  $busy = Get-TcpListeners @(80, 443)
+  if ($busy.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'Порты 80/443 заняты другой программой:' -ForegroundColor Red
+    foreach ($l in ($busy | Sort-Object LocalPort, OwningProcess -Unique)) {
+      Write-Host ("  порт {0}: {1}" -f $l.LocalPort, (Get-ProcDescription $l.OwningProcess)) -ForegroundColor Red
+    }
+    Write-Host ''
+    Write-Host 'Сервису видеовстреч нужны порты 80 и 443 для HTTPS (сертификат Let''s Encrypt).'
+    Write-Host 'Я ничего не останавливаю сам. Освободите порты (например, отключите сайт по умолчанию в IIS:'
+    Write-Host '  Stop-Service W3SVC; Set-Service W3SVC -StartupType Disabled' -ForegroundColor Yellow
+    Write-Host 'если IIS не нужен) и запустите установку снова.'
+    exit 1
   }
-} catch {
-  Warn "Внимание: домен $Domain пока не находится в DNS. Проверьте A-запись на $PublicIp."
+  foreach ($pp in @($LiveKitPort, 7881)) {
+    $l = Get-TcpListeners @($pp)
+    if ($l.Count -gt 0) { Die ("порт {0}/TCP нужен LiveKit, но занят: {1}" -f $pp, (Get-ProcDescription $l[0].OwningProcess)) }
+  }
+  $l = Get-UdpListeners @(3478)
+  if ($l.Count -gt 0) { Die ("порт 3478/UDP нужен LiveKit (TURN), но занят: {0}" -f (Get-ProcDescription $l[0].OwningProcess)) }
+  Ok 'Порты 80, 443, 7880, 7881, 3478 свободны.'
+
+  # ---------- Домен ----------
+  if (-not $Domain) { $Domain = Get-Cfg 'domain' }
+  if (-not $Domain) {
+    $DefaultDomain = ($PublicIp -replace '\.', '-') + '.sslip.io'
+    Write-Host ''
+    Write-Host "Укажите домен или поддомен, направленный (A-запись) на IP $PublicIp, например meet.mysite.ru"
+    Write-Host "Если домена нет — нажмите Enter, будет бесплатный адрес $DefaultDomain"
+    Write-Host '(свой домен лучше: адреса *.sslip.io иногда блокируют антивирусы и корпоративные сети)' -ForegroundColor DarkGray
+    $Domain = (Read-Host 'Домен').Trim()
+    if (-not $Domain) { $Domain = $DefaultDomain }
+  }
+  $Domain = ($Domain.Trim() -replace '^https?://', '' -replace '/.*$', '').ToLower()
+  if ($Domain -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$') { Die "неверный домен: $Domain" }
+  Write-Host "Домен: $Domain"
+  try {
+    $ips = @(Resolve-DnsName -Name $Domain -Type A -DnsOnly -ErrorAction Stop | Where-Object { $_.IPAddress } | ForEach-Object { $_.IPAddress })
+    if ($ips -notcontains $PublicIp) {
+      Warn "Внимание: $Domain указывает на $($ips -join ', '), а IP этого сервера $PublicIp. HTTPS-сертификат не выпустится, пока A-запись не исправлена."
+    }
+  } catch {
+    Warn "Внимание: домен $Domain пока не находится в DNS. Проверьте A-запись на $PublicIp."
+  }
 }
 
 # ---------- Пароль админки ----------
@@ -330,16 +368,26 @@ if (-not $Port -or (Test-TcpPortBusy ([int]$Port))) {
   while ((Test-TcpPortBusy $Port) -or $Port -eq $LiveKitPort -or $Port -eq 7881) { $Port++ }
 }
 $Port = [int]$Port
-Write-Host "Порт приложения: $Port (только для этого компьютера, снаружи — через Caddy)"
+if ($IsLocal) {
+  Write-Host "Порт приложения: $Port (только для этого компьютера)"
+  $AdminUrl = "http://127.0.0.1:$Port/admin"
+} else {
+  Write-Host "Порт приложения: $Port (только для этого компьютера, снаружи — через Caddy)"
+  $AdminUrl = "https://$Domain/admin"
+}
 
-Set-Cfg 'domain' $Domain
+Set-Cfg 'mode' $Mode
+if (-not $IsLocal) {
+  Set-Cfg 'domain' $Domain
+  Set-Cfg 'publicIp' $PublicIp
+}
+Set-Cfg 'adminUrl' $AdminUrl
 Set-Cfg 'adminPassword' $AdminPassword
 Set-Cfg 'port' $Port
 Set-Cfg 'livekitPort' $LiveKitPort
 Set-Cfg 'livekitKey' $LkKey
 Set-Cfg 'livekitSecret' $LkSecret
 Set-Cfg 'branch' $Branch
-Set-Cfg 'publicIp' $PublicIp
 Save-Config $cfg
 Ok "Настройки сохранены: $CfgPath"
 
@@ -388,42 +436,47 @@ if ((Test-Path (Join-Path $Bin 'ffmpeg.exe')) -and (Test-Path (Join-Path $Bin 'f
   Ok 'ffmpeg установлен.'
 }
 
-Say 'Caddy (HTTPS)'
-$CaddyExe = Join-Path $Bin 'caddy.exe'
-if ((Test-Path $CaddyExe) -and -not $UpdateTools) {
-  Write-Host 'Уже установлен.'
+if ($IsLocal) {
+  Write-Host ''
+  Write-Host 'Caddy и LiveKit в локальном режиме не нужны — пропускаю.'
 } else {
-  $tmpExe = Join-Path $TmpDir 'caddy.exe'
-  Get-File 'https://caddyserver.com/api/download?os=windows&arch=amd64' $tmpExe
-  Move-Item -Force $tmpExe $CaddyExe
-  Ok 'Caddy установлен.'
-}
+  Say 'Caddy (HTTPS)'
+  $CaddyExe = Join-Path $Bin 'caddy.exe'
+  if ((Test-Path $CaddyExe) -and -not $UpdateTools) {
+    Write-Host 'Уже установлен.'
+  } else {
+    $tmpExe = Join-Path $TmpDir 'caddy.exe'
+    Get-File 'https://caddyserver.com/api/download?os=windows&arch=amd64' $tmpExe
+    Move-Item -Force $tmpExe $CaddyExe
+    Ok 'Caddy установлен.'
+  }
 
-Say 'LiveKit (медиасервер)'
-$LkExe = Join-Path $Bin 'livekit-server.exe'
-if ((Test-Path $LkExe) -and -not $UpdateTools) {
-  Write-Host 'Уже установлен.'
-} else {
-  $LkReleases = 'https://github.com/livekit/livekit/releases'
-  try {
-    $relInfo = Invoke-RestMethod -Uri 'https://api.github.com/repos/livekit/livekit/releases/latest' -UseBasicParsing -Headers @{ 'User-Agent' = 'conference-installer' }
-  } catch {
-    Die "не удалось узнать последнюю версию LiveKit ($($_.Exception.Message)). Скачайте вручную файл livekit_..._windows_amd64.zip со страницы $LkReleases и положите livekit-server.exe в $Bin, затем запустите установку снова."
+  Say 'LiveKit (медиасервер)'
+  $LkExe = Join-Path $Bin 'livekit-server.exe'
+  if ((Test-Path $LkExe) -and -not $UpdateTools) {
+    Write-Host 'Уже установлен.'
+  } else {
+    $LkReleases = 'https://github.com/livekit/livekit/releases'
+    try {
+      $relInfo = Invoke-RestMethod -Uri 'https://api.github.com/repos/livekit/livekit/releases/latest' -UseBasicParsing -Headers @{ 'User-Agent' = 'conference-installer' }
+    } catch {
+      Die "не удалось узнать последнюю версию LiveKit ($($_.Exception.Message)). Скачайте вручную файл livekit_..._windows_amd64.zip со страницы $LkReleases и положите livekit-server.exe в $Bin, затем запустите установку снова."
+    }
+    $asset = $relInfo.assets | Where-Object { $_.name -like '*windows_amd64.zip' } | Select-Object -First 1
+    if (-not $asset) {
+      Die "в выпуске LiveKit $($relInfo.tag_name) нет сборки для Windows (windows_amd64.zip). Скачайте её вручную со страницы $LkReleases и положите livekit-server.exe в $Bin, затем запустите установку снова."
+    }
+    Write-Host "Скачиваю LiveKit $($relInfo.tag_name)"
+    $zip = Join-Path $TmpDir 'livekit.zip'
+    Get-File $asset.browser_download_url $zip
+    $ex = Join-Path $TmpDir 'livekit'
+    Expand-Zip $zip $ex
+    $f = Get-ChildItem $ex -Recurse -Filter 'livekit-server.exe' | Select-Object -First 1
+    if (-not $f) { Die "в архиве $($asset.name) нет livekit-server.exe" }
+    Copy-Item -Force $f.FullName $LkExe
+    Remove-Dir $ex; Remove-Item -Force $zip
+    Ok 'LiveKit установлен.'
   }
-  $asset = $relInfo.assets | Where-Object { $_.name -like '*windows_amd64.zip' } | Select-Object -First 1
-  if (-not $asset) {
-    Die "в выпуске LiveKit $($relInfo.tag_name) нет сборки для Windows (windows_amd64.zip). Скачайте её вручную со страницы $LkReleases и положите livekit-server.exe в $Bin, затем запустите установку снова."
-  }
-  Write-Host "Скачиваю LiveKit $($relInfo.tag_name)"
-  $zip = Join-Path $TmpDir 'livekit.zip'
-  Get-File $asset.browser_download_url $zip
-  $ex = Join-Path $TmpDir 'livekit'
-  Expand-Zip $zip $ex
-  $f = Get-ChildItem $ex -Recurse -Filter 'livekit-server.exe' | Select-Object -First 1
-  if (-not $f) { Die "в архиве $($asset.name) нет livekit-server.exe" }
-  Copy-Item -Force $f.FullName $LkExe
-  Remove-Dir $ex; Remove-Item -Force $zip
-  Ok 'LiveKit установлен.'
 }
 
 # ---------- Код приложения ----------
@@ -471,8 +524,9 @@ if (Test-Path $videoSrc) {
 }
 
 # ---------- Конфиги LiveKit и Caddy ----------
-Say 'Пишу конфиги LiveKit и Caddy'
-$lk = @"
+if (-not $IsLocal) {
+  Say 'Пишу конфиги LiveKit и Caddy'
+  $lk = @"
 # Сгенерировано install.ps1 — при повторной установке файл перезаписывается.
 port: $LiveKitPort
 bind_addresses: ["0.0.0.0"]
@@ -494,9 +548,9 @@ keys:
 logging:
   level: info
 "@
-Write-TextFile $LkYaml $lk $Utf8NoBom
+  Write-TextFile $LkYaml $lk $Utf8NoBom
 
-$caddy = @"
+  $caddy = @"
 # Сгенерировано install.ps1 — при повторной установке файл перезаписывается.
 # Сертификат Let's Encrypt выпускается автоматически (нужны открытые порты 80 и 443).
 $Domain {
@@ -511,13 +565,14 @@ $Domain {
 	}
 }
 "@
-Write-TextFile $Caddyfile $caddy $Utf8NoBom
-New-Item -ItemType Directory -Force -Path (Join-Path $Root 'caddy-data'), (Join-Path $Root 'caddy-config') | Out-Null
-$ErrorActionPreference = 'Continue'
-$v = & $CaddyExe validate --config $Caddyfile --adapter caddyfile 2>&1
-$rc = $LASTEXITCODE
-$ErrorActionPreference = 'Stop'
-if ($rc -ne 0) { $v | ForEach-Object { Write-Host "   $_" }; Die 'Caddy не принял Caddyfile' }
+  Write-TextFile $Caddyfile $caddy $Utf8NoBom
+  New-Item -ItemType Directory -Force -Path (Join-Path $Root 'caddy-data'), (Join-Path $Root 'caddy-config') | Out-Null
+  $ErrorActionPreference = 'Continue'
+  $v = & $CaddyExe validate --config $Caddyfile --adapter caddyfile 2>&1
+  $rc = $LASTEXITCODE
+  $ErrorActionPreference = 'Stop'
+  if ($rc -ne 0) { $v | ForEach-Object { Write-Host "   $_" }; Die 'Caddy не принял Caddyfile' }
+}
 
 # ---------- Скрипты-надзиратели ----------
 Say 'Создаю службы (Планировщик заданий)'
@@ -570,12 +625,19 @@ function Get-Spec {
       $env:HOST            = '127.0.0.1'
       $env:DATA_DIR        = Join-Path $Root 'data'
       $env:ADMIN_PASSWORD  = [string]$cfg.adminPassword
-      $env:PUBLIC_DOMAIN   = [string]$cfg.domain
       $env:MAX_UPLOAD_MB   = '4096'
-      $env:LIVEKIT_URL     = 'wss://' + $cfg.domain
-      $env:LIVEKIT_API_URL = 'http://127.0.0.1:' + $cfg.livekitPort
-      $env:LIVEKIT_KEY     = [string]$cfg.livekitKey
-      $env:LIVEKIT_SECRET  = [string]$cfg.livekitSecret
+      if ([string]$cfg.mode -eq 'local') {
+        # локальный режим: нет домена и LiveKit — видеовстречи в браузере выключены, работает админка и Zoom
+        foreach ($k in @('PUBLIC_DOMAIN', 'LIVEKIT_URL', 'LIVEKIT_API_URL', 'LIVEKIT_KEY', 'LIVEKIT_SECRET')) {
+          Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+        }
+      } else {
+        $env:PUBLIC_DOMAIN   = [string]$cfg.domain
+        $env:LIVEKIT_URL     = 'wss://' + $cfg.domain
+        $env:LIVEKIT_API_URL = 'http://127.0.0.1:' + $cfg.livekitPort
+        $env:LIVEKIT_KEY     = [string]$cfg.livekitKey
+        $env:LIVEKIT_SECRET  = [string]$cfg.livekitSecret
+      }
       return @{ Exe = (Join-Path $NodeDir 'node.exe'); Args = @('server.js'); Dir = (Join-Path $Root 'app') }
     }
     'livekit' {
@@ -638,19 +700,22 @@ foreach ($s in $Services) {
 }
 
 # ---------- Брандмауэр ----------
-Say 'Настраиваю брандмауэр Windows'
-Get-NetFirewallRule -DisplayName 'Conference*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-$rules = @(
-  @{ Name = 'Conference HTTP (TCP 80)';          Proto = 'TCP'; Port = '80' },
-  @{ Name = 'Conference HTTPS (TCP 443)';        Proto = 'TCP'; Port = '443' },
-  @{ Name = 'Conference HTTP/3 (UDP 443)';       Proto = 'UDP'; Port = '443' },
-  @{ Name = 'Conference LiveKit RTC (TCP 7881)'; Proto = 'TCP'; Port = '7881' },
-  @{ Name = 'Conference TURN (UDP 3478)';        Proto = 'UDP'; Port = '3478' },
-  @{ Name = 'Conference WebRTC (UDP 50000-50200)'; Proto = 'UDP'; Port = '50000-50200' }
-)
-foreach ($r in $rules) {
-  New-NetFirewallRule -DisplayName $r.Name -Direction Inbound -Action Allow -Protocol $r.Proto -LocalPort $r.Port -Profile Any | Out-Null
-  Write-Host "  $($r.Name)"
+# в локальном режиме снаружи ничего не открываем: приложение слушает только 127.0.0.1
+if (-not $IsLocal) {
+  Say 'Настраиваю брандмауэр Windows'
+  Get-NetFirewallRule -DisplayName 'Conference*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+  $rules = @(
+    @{ Name = 'Conference HTTP (TCP 80)';          Proto = 'TCP'; Port = '80' },
+    @{ Name = 'Conference HTTPS (TCP 443)';        Proto = 'TCP'; Port = '443' },
+    @{ Name = 'Conference HTTP/3 (UDP 443)';       Proto = 'UDP'; Port = '443' },
+    @{ Name = 'Conference LiveKit RTC (TCP 7881)'; Proto = 'TCP'; Port = '7881' },
+    @{ Name = 'Conference TURN (UDP 3478)';        Proto = 'UDP'; Port = '3478' },
+    @{ Name = 'Conference WebRTC (UDP 50000-50200)'; Proto = 'UDP'; Port = '50000-50200' }
+  )
+  foreach ($r in $rules) {
+    New-NetFirewallRule -DisplayName $r.Name -Direction Inbound -Action Allow -Protocol $r.Proto -LocalPort $r.Port -Profile Any | Out-Null
+    Write-Host "  $($r.Name)"
+  }
 }
 
 # ---------- Запуск ----------
@@ -660,21 +725,26 @@ foreach ($s in $Services) { Start-ConfService $s; Start-Sleep -Seconds 1 }
 $okApp = Wait-Url "http://127.0.0.1:$Port/api/me" 60 ''
 if ($okApp) { Write-Host "✅ Приложение отвечает (127.0.0.1:$Port)" -ForegroundColor Green }
 else { Write-Host "❌ Приложение не отвечает на http://127.0.0.1:$Port/api/me — смотрите $LogDir\app.log" -ForegroundColor Red }
-$okLk = Wait-Url "http://127.0.0.1:$LiveKitPort/" 60 'OK'
-if ($okLk) { Write-Host "✅ LiveKit отвечает (127.0.0.1:$LiveKitPort)" -ForegroundColor Green }
-else { Write-Host "❌ LiveKit не отвечает на http://127.0.0.1:$LiveKitPort — смотрите $LogDir\livekit.log" -ForegroundColor Red }
-Write-Host 'Жду HTTPS-сертификат (до минуты)...'
-$okHttps = Wait-Url "https://$Domain/api/me" 60 ''
-if ($okHttps) { Write-Host "✅ Сайт доступен по HTTPS: https://$Domain" -ForegroundColor Green }
-else {
-  Write-Host "❌ https://$Domain пока не отвечает — смотрите $LogDir\caddy.log" -ForegroundColor Red
-  Warn '   Частые причины: порты 80/443 закрыты в панели хостера; A-запись домена ещё не обновилась. Проверка: video check'
+$okLk = $true
+$okHttps = $true
+if (-not $IsLocal) {
+  $okLk = Wait-Url "http://127.0.0.1:$LiveKitPort/" 60 'OK'
+  if ($okLk) { Write-Host "✅ LiveKit отвечает (127.0.0.1:$LiveKitPort)" -ForegroundColor Green }
+  else { Write-Host "❌ LiveKit не отвечает на http://127.0.0.1:$LiveKitPort — смотрите $LogDir\livekit.log" -ForegroundColor Red }
+  Write-Host 'Жду HTTPS-сертификат (до минуты)...'
+  $okHttps = Wait-Url "https://$Domain/api/me" 60 ''
+  if ($okHttps) { Write-Host "✅ Сайт доступен по HTTPS: https://$Domain" -ForegroundColor Green }
+  else {
+    Write-Host "❌ https://$Domain пока не отвечает — смотрите $LogDir\caddy.log" -ForegroundColor Red
+    Warn '   Частые причины: порты 80/443 закрыты в панели хостера; A-запись домена ещё не обновилась. Проверка: video check'
+  }
 }
 
 if (-not ($okApp -and $okLk)) {
   Write-Host ''
   Write-Host '--- последние строки логов ---' -ForegroundColor Yellow
   foreach ($s in @('app', 'livekit')) {
+    if ($Services -notcontains $s) { continue }
     $lf = Join-Path $LogDir "$s.log"
     if (Test-Path $lf) { Write-Host "[$s]"; Get-Content -Encoding UTF8 -Tail 15 $lf | ForEach-Object { Write-Host "  $_" } }
   }
@@ -685,20 +755,35 @@ Remove-Dir $TmpDir
 $line = '=' * 60
 Write-Host ''
 Write-Host $line -ForegroundColor Green
-if ($okApp -and $okLk -and $okHttps) { Write-Host '  Готово!' -ForegroundColor Green }
-elseif ($okApp -and $okLk) { Write-Host '  Готово! (HTTPS ещё настраивается — проверьте через пару минут: video check)' -ForegroundColor Green }
-else { Write-Host '  Установка завершена с ошибками — см. сообщения выше (video check, video logs).' -ForegroundColor Yellow }
-Write-Host "  Сайт:          https://$Domain"
-Write-Host "  Админ-панель:  https://$Domain/admin"
-if ($GeneratedPassword) { Write-Host "  Пароль админа: $AdminPassword   (сохраните его!)" -ForegroundColor Yellow }
-Write-Host ''
-Write-Host "  Настройки:  $CfgPath     Данные: $DataDir"
-Write-Host "  Логи:       video logs   (video logs livekit, video logs caddy)"
-Write-Host '  Обновить:   video update      (все команды: video help, проверка: video check)'
-Write-Host '  Если у хостера есть свой файрвол — откройте в его панели входящие порты:'
-Write-Host '    TCP 80, 443, 7881;  UDP 443, 3478, 50000-50200'
-if ($Domain -like '*.sslip.io') {
-  Write-Host '  Адрес *.sslip.io временный: лучше свой домен (A-запись на этот IP), затем:' -ForegroundColor DarkYellow
-  Write-Host "    powershell -ExecutionPolicy Bypass -File $AppDir\deploy\windows\install.ps1 -Domain meet.ваш-домен.ru" -ForegroundColor DarkYellow
+if ($IsLocal) {
+  if ($okApp) { Write-Host '  Готово! (локальный режим)' -ForegroundColor Green }
+  else { Write-Host '  Установка завершена с ошибками — см. сообщения выше (video check, video logs).' -ForegroundColor Yellow }
+  Write-Host "  Админ-панель:  $AdminUrl"
+  Write-Host '  Логин:         admin'
+  if ($GeneratedPassword) { Write-Host "  Пароль админа: $AdminPassword   (сохраните его!)" -ForegroundColor Yellow }
+  Write-Host '  Панель открывается только на этом компьютере (сайта в интернете нет).' -ForegroundColor DarkGray
+  Write-Host ''
+  Write-Host "  Настройки:  $CfgPath     Данные: $DataDir"
+  Write-Host '  Логи:       video logs'
+  Write-Host '  Обновить:   video update      (все команды: video help, проверка: video check)'
+  Write-Host '  Нужен сайт для видеовстреч в браузере (HTTPS, свой домен):' -ForegroundColor DarkGray
+  Write-Host "    powershell -ExecutionPolicy Bypass -File $AppDir\deploy\windows\install.ps1 -Full" -ForegroundColor DarkGray
+} else {
+  if ($okApp -and $okLk -and $okHttps) { Write-Host '  Готово!' -ForegroundColor Green }
+  elseif ($okApp -and $okLk) { Write-Host '  Готово! (HTTPS ещё настраивается — проверьте через пару минут: video check)' -ForegroundColor Green }
+  else { Write-Host '  Установка завершена с ошибками — см. сообщения выше (video check, video logs).' -ForegroundColor Yellow }
+  Write-Host "  Сайт:          https://$Domain"
+  Write-Host "  Админ-панель:  $AdminUrl"
+  if ($GeneratedPassword) { Write-Host "  Пароль админа: $AdminPassword   (сохраните его!)" -ForegroundColor Yellow }
+  Write-Host ''
+  Write-Host "  Настройки:  $CfgPath     Данные: $DataDir"
+  Write-Host "  Логи:       video logs   (video logs livekit, video logs caddy)"
+  Write-Host '  Обновить:   video update      (все команды: video help, проверка: video check)'
+  Write-Host '  Если у хостера есть свой файрвол — откройте в его панели входящие порты:'
+  Write-Host '    TCP 80, 443, 7881;  UDP 443, 3478, 50000-50200'
+  if ($Domain -like '*.sslip.io') {
+    Write-Host '  Адрес *.sslip.io временный: лучше свой домен (A-запись на этот IP), затем:' -ForegroundColor DarkYellow
+    Write-Host "    powershell -ExecutionPolicy Bypass -File $AppDir\deploy\windows\install.ps1 -Domain meet.ваш-домен.ru" -ForegroundColor DarkYellow
+  }
 }
 Write-Host $line -ForegroundColor Green
