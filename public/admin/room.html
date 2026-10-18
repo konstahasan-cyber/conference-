@@ -46,10 +46,13 @@
       <div class="card span2" id="zoomCard">
         <div class="row between" style="margin-bottom:10px"><h3 style="margin:0"><i data-ic="video"></i>Показ в Zoom</h3><span class="badge" id="zrBadge">пульт не подключён</span></div>
         <div class="muted small" style="margin-bottom:12px">Запись этой встречи будет идти и в Zoom-встрече: Zoom-пульт на сервере сам запустит её в OBS как камеру и зайдёт в Zoom по ссылке. Расписание, повтор и кнопки «Запустить/Пауза/Стоп» ниже управляют и Zoom.</div>
+        <label class="switch"><span class="txt"><b>Создавать встречу в Zoom автоматически</b><span>По названию и расписанию — встреча появится в вашем Zoom, ссылка обновляется сама. Нужен подключённый аккаунт (раздел «Zoom» в админке)</span></span><input type="checkbox" id="zoomAuto"><span class="knob"></span></label>
         <label class="switch"><span class="txt"><b>Показывать в Zoom</b><span>Когда запись запускается — пульт заходит в эту Zoom-встречу</span></span><input type="checkbox" id="zoomEnabled"><span class="knob"></span></label>
-        <label class="field" style="margin-top:8px"><span>Ссылка-приглашение Zoom</span>
+        <label class="field" style="margin-top:8px"><span>Ссылка на Zoom-встречу</span>
           <div class="row nowrap"><input id="zoomLink" placeholder="https://us05web.zoom.us/j/81234567890?pwd=..." autocomplete="off"><button class="btn" id="zoomSave">Сохранить</button></div></label>
-        <div class="row" style="margin-top:8px"><button class="btn" id="zoomTest" title="Запись запустится в OBS, но пульт не будет заходить в Zoom — удобно проверить картинку и звук"><i data-ic="play"></i>Тест без входа в Zoom</button>
+        <div class="small hidden" id="zoomSyncErr" style="color:#ff8a95;margin-top:6px"></div>
+        <div class="row" style="margin-top:8px"><button class="btn primary" id="zoomInvite"><i data-ic="copy"></i>Скопировать приглашение</button>
+          <button class="btn" id="zoomTest" title="Запись запустится в OBS, но пульт не будет заходить в Zoom — удобно проверить картинку и звук"><i data-ic="play"></i>Тест без входа в Zoom</button>
           <span class="small muted" id="zoomTestHint"></span></div>
         <div class="small" id="zrStatus" style="margin-top:10px"></div>
       </div>

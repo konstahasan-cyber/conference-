@@ -15,6 +15,7 @@
     <button class="nav-item" data-tab="recordings"><i data-ic="film"></i>Записи</button>
     <button class="nav-item" data-tab="studio"><i data-ic="circle-dot"></i>Студия записи</button>
     <button class="nav-item" data-tab="emojis"><i data-ic="smile"></i>Эмодзи</button>
+    <button class="nav-item" data-tab="zoom"><i data-ic="key-round"></i>Zoom</button>
     <button class="nav-item" data-tab="defaults"><i data-ic="sliders-horizontal"></i>По умолчанию</button>
     <button class="nav-item hidden" data-tab="admins" id="navAdmins"><i data-ic="user-round-cog"></i>Админы</button>
     <div class="me">
@@ -30,13 +31,42 @@
       <div class="page-head">
         <div class="grow"><h1>Встречи</h1><div class="sub">Создавайте комнаты, приглашайте людей и запускайте записи</div></div>
         <form class="row" id="newRoom">
-          <input id="newRoomName" style="width:260px" placeholder="Название новой встречи" maxlength="100">
-          <button class="btn primary"><i data-ic="plus"></i>Создать</button>
+          <input id="newRoomName" style="width:220px" placeholder="Название новой встречи" maxlength="100">
+          <button class="btn"><i data-ic="plus"></i>Создать</button>
+          <button type="button" class="btn primary" id="wizOpen"><i data-ic="calendar-clock"></i>Новый автовебинар</button>
         </form>
       </div>
       <div class="grid-3" id="roomsGrid"></div>
       <div class="card empty hidden" id="roomsEmpty"><i data-ic="video"></i><div>Встреч пока нет — создайте первую.<br><span class="small">Новая встреча получит настройки из раздела «По умолчанию».</span></div></div>
     </section>
+
+    <!-- Мастер «Новый автовебинар» -->
+    <div id="wizModal" class="overlay hidden">
+      <div class="card modal stack" style="max-width:520px">
+        <div class="row between"><h3 style="margin:0"><i data-ic="calendar-clock"></i>Новый автовебинар</h3><button class="btn icon ghost" id="wizClose" type="button"><i data-ic="x"></i></button></div>
+        <form id="wizForm" class="stack">
+          <label class="field"><span>Название (так встреча будет называться и в Zoom)</span><input id="wizName" maxlength="100" placeholder="Например, Вебинар для новых сотрудников" required></label>
+          <label class="field"><span>Запись</span><select id="wizRec" required></select></label>
+          <div class="row nowrap">
+            <label class="field grow"><span>Начало</span><input type="datetime-local" id="wizStart" required></label>
+            <label class="field"><span>Повтор</span><select id="wizRepeat">
+              <option value="none">Один раз</option><option value="daily">Каждый день</option><option value="weekdays">По будням (пн–пт)</option><option value="weekly">Каждую неделю</option></select></label>
+          </div>
+          <label class="switch"><span class="txt"><b>Создать встречу в Zoom</b><span id="wizZoomHint">Программа создаст встречу в вашем Zoom, сама зайдёт в неё и покажет запись</span></span><input type="checkbox" id="wizZoom" checked><span class="knob"></span></label>
+          <button class="btn primary lg block" id="wizSubmit"><i data-ic="sparkles"></i>Создать и получить ссылку</button>
+        </form>
+        <div id="wizResult" class="stack hidden">
+          <div class="row nowrap" style="gap:10px"><i data-ic="check" class="lg" style="color:var(--ok,#3ecf8e)"></i><b>Готово! Отправьте это приглашение участникам:</b></div>
+          <textarea id="wizInvite" rows="7" readonly style="width:100%;resize:vertical"></textarea>
+          <div class="small" id="wizWarn" style="color:#fcc96b"></div>
+          <div class="row">
+            <button class="btn primary" id="wizCopy" type="button"><i data-ic="copy"></i>Скопировать приглашение</button>
+            <button class="btn" id="wizCopyLink" type="button"><i data-ic="link"></i>Только ссылку</button>
+            <a class="btn" id="wizPult"><i data-ic="sliders-horizontal"></i>Пульт</a>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- Записи -->
     <section id="tab-recordings" class="hidden">
@@ -114,6 +144,39 @@
         <h3><i data-ic="sparkles"></i>Набор стикеров</h3>
         <div class="muted small" style="margin-bottom:12px">Доступен всем на любой встрече.</div>
         <div class="emoji-grid" id="packGrid"></div>
+      </div>
+    </section>
+
+    <!-- Zoom -->
+    <section id="tab-zoom" class="hidden">
+      <div class="page-head"><div class="grow"><h1>Аккаунт Zoom</h1><div class="sub">Подключите Zoom — и программа будет сама создавать встречи, планировать их и выдавать ссылки</div></div></div>
+      <div class="grid-2">
+        <div class="card stack">
+          <h3><i data-ic="key-round"></i>Подключение <span class="badge" id="zaBadge">не подключён</span></h3>
+          <form id="zaForm" class="stack">
+            <label class="field"><span>Account ID</span><input id="zaAccount" autocomplete="off" required></label>
+            <label class="field"><span>Client ID</span><input id="zaClient" autocomplete="off" required></label>
+            <label class="field"><span>Client Secret</span><input id="zaSecret" type="password" autocomplete="new-password" placeholder="••••••••"></label>
+            <label class="field"><span>Email организатора в Zoom (необязательно)</span><input id="zaEmail" type="email" autocomplete="off" placeholder="если пусто — владелец аккаунта"></label>
+            <div class="row"><button class="btn primary"><i data-ic="check"></i>Подключить и проверить</button>
+              <button class="btn danger hidden" type="button" id="zaOff"><i data-ic="ban"></i>Отключить</button></div>
+            <div class="small" id="zaStatus"></div>
+          </form>
+        </div>
+        <div class="card stack small">
+          <h3><i data-ic="info"></i>Где взять ключи (5 минут, бесплатно)</h3>
+          <ol style="margin:0;padding-left:20px;line-height:1.7">
+            <li>Откройте <a href="https://marketplace.zoom.us/" target="_blank" rel="noopener">marketplace.zoom.us</a> и войдите тем аккаунтом Zoom, от которого идут вебинары.</li>
+            <li>Справа вверху <b>Develop → Build App</b> → <b>Server-to-Server OAuth App</b> → <b>Create</b>, имя любое (например, «Автовебинары»).</li>
+            <li>На вкладке <b>App Credentials</b> скопируйте сюда <b>Account ID</b>, <b>Client ID</b> и <b>Client Secret</b>.</li>
+            <li><b>Information</b>: заполните название компании, имя и email (обязательные поля).</li>
+            <li><b>Scopes → Add Scopes</b>: найдите <b>Meeting</b> и отметьте создание, просмотр, изменение и удаление встреч
+              (<code>meeting:write:meeting:admin</code>, <code>meeting:read:meeting:admin</code>, <code>meeting:update:meeting:admin</code>, <code>meeting:delete:meeting:admin</code>),
+              и в <b>User</b> — просмотр пользователя (<code>user:read:user:admin</code>, <code>user:read:list_users:admin</code>).</li>
+            <li><b>Activation → Activate your app</b>. Затем нажмите «Подключить и проверить».</li>
+          </ol>
+          <div class="muted">Ссылки создаются во встречах вашего аккаунта. Чтобы программа заходила как организатор, в Zoom на сервере нужно войти этим же аккаунтом. На бесплатном Zoom встреча длится до 40 минут.</div>
+        </div>
       </div>
     </section>
 

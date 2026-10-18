@@ -1,5 +1,5 @@
 // Админ-панель: встречи, записи, студия, эмодзи, настройки по умолчанию, админы
-const tabs = ['rooms', 'recordings', 'studio', 'emojis', 'defaults', 'admins'];
+const tabs = ['rooms', 'recordings', 'studio', 'emojis', 'zoom', 'defaults', 'admins'];
 let me = null;
 let recordings = [];
 
@@ -8,16 +8,18 @@ function openTab(name) {
   $$('.nav-item[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   tabs.forEach((t) => $(`#tab-${t}`).classList.toggle('hidden', t !== name));
   history.replaceState(null, '', '#' + name);
-  ({ rooms: loadRooms, recordings: loadRecordings, emojis: loadEmojiTab, defaults: loadDefaults, admins: loadUsers }[name] || (() => {}))();
+  ({ rooms: loadRooms, recordings: loadRecordings, zoom: loadZoomAccount, emojis: loadEmojiTab, defaults: loadDefaults, admins: loadUsers }[name] || (() => {}))();
 }
 $$('.nav-item[data-tab]').forEach((b) => (b.onclick = () => openTab(b.dataset.tab)));
 $('#logout').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
 
 // ---------- Встречи ----------
+let roomsCache = [];
 async function loadRooms() {
   const [rooms, recs] = await Promise.all([api('/api/rooms'), api('/api/recordings')]);
   recordings = recs;
   $('#roomsEmpty').classList.toggle('hidden', rooms.length > 0);
+  roomsCache = rooms;
   $('#roomsGrid').innerHTML = rooms.map((r) => {
     const rec = recordings.find((x) => x.id === r.playback.recordingId);
     const pbState = { playing: '<span class="badge live">в эфире</span>', paused: '<span class="badge warn">пауза</span>', ended: '<span class="badge">закончилась</span>' }[r.live.playback] || '';
@@ -33,13 +35,16 @@ async function loadRooms() {
         ${r.live.waiting ? `<span class="badge warn">${ic('clock', 'sm')} ждут: ${r.live.waiting}</span>` : ''}
         ${lock}
         ${r.playback.repeat !== 'none' && r.playback.startMode === 'scheduled' ? `<span class="badge accent">${ic('repeat', 'sm')} повтор</span>` : ''}
+        ${r.zoom?.enabled && r.zoom.link ? `<span class="badge ok">${ic('video', 'sm')} Zoom</span>` : ''}
       </div>
+      ${r.zoom?.syncError ? `<div class="small" style="color:#ff8a95">${ic('triangle-alert', 'sm')} Zoom: ${esc(r.zoom.syncError)}</div>` : ''}
       <div class="small muted">${rec ? `${ic('film', 'sm')} ${esc(rec.title)} — ${scheduleText(r.playback, r.nextStart)}` : 'Запись не выбрана'}</div>
       <div class="actions">
         <a class="btn sm primary" href="/admin/room/${encodeURIComponent(r.id)}">${ic('sliders-horizontal', 'sm')} Пульт</a>
         <a class="btn sm" href="/r/${encodeURIComponent(r.id)}" target="_blank" title="Войти невидимо — участники вас не увидят">${ic('eye-off', 'sm')} Войти</a>
         <a class="btn sm" href="/r/${encodeURIComponent(r.id)}?live=1" target="_blank" title="Войти открыто, с камерой и микрофоном">${ic('radio', 'sm')}</a>
-        <button class="btn sm" data-copy="${esc(r.id)}" title="Скопировать ссылку">${ic('link', 'sm')}</button>
+        ${r.zoom?.link ? `<button class="btn sm" data-invite="${esc(r.id)}" title="Скопировать приглашение со ссылкой Zoom">${ic('video', 'sm')} Ссылка Zoom</button>`
+          : `<button class="btn sm" data-copy="${esc(r.id)}" title="Скопировать ссылку">${ic('link', 'sm')}</button>`}
         <button class="btn sm" data-dup="${esc(r.id)}" title="Дублировать с теми же настройками">${ic('copy-plus', 'sm')}</button>
         <button class="btn sm danger" data-del="${esc(r.id)}" title="Удалить">${ic('trash-2', 'sm')}</button>
       </div></div>`;
@@ -47,6 +52,11 @@ async function loadRooms() {
 }
 
 $('#roomsGrid').onclick = async (e) => {
+  const inv = e.target.closest('[data-invite]');
+  if (inv) {
+    const r = roomsCache.find((x) => x.id === inv.dataset.invite);
+    if (r) copyText(inviteText(r), 'Приглашение со ссылкой Zoom скопировано');
+  }
   const copy = e.target.closest('[data-copy]');
   if (copy) {
     await navigator.clipboard.writeText(`${location.origin}/r/${copy.dataset.copy}`).catch(() => {});
@@ -69,6 +79,85 @@ $('#newRoom').onsubmit = async (e) => {
   e.preventDefault();
   const room = await api('/api/rooms', { method: 'POST', body: { name: $('#newRoomName').value } });
   location.href = `/admin/room/${room.id}`;
+};
+
+// ---------- Мастер «Новый автовебинар» ----------
+let zoomAccount = null;
+const wizClose = () => { $('#wizModal').classList.add('hidden'); loadRooms().catch(() => {}); };
+$('#wizClose').onclick = wizClose;
+$('#wizModal').onclick = (e) => { if (e.target.id === 'wizModal') wizClose(); };
+$('#wizOpen').onclick = async () => {
+  const [recs, acc] = await Promise.all([api('/api/recordings'), api('/api/zoom/account')]);
+  recordings = recs; zoomAccount = acc;
+  $('#wizRec').innerHTML = recs.length
+    ? recs.slice().reverse().map((r) => `<option value="${r.id}">${esc(r.title)}${r.duration ? ' · ' + fmtTime(r.duration) : ''}</option>`).join('')
+    : '<option value="">— сначала загрузите запись в «Записи» —</option>';
+  const d = new Date(Date.now() + 86400000); d.setHours(19, 0, 0, 0);
+  $('#wizStart').value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  $('#wizZoom').checked = acc.connected;
+  $('#wizZoomHint').innerHTML = acc.connected
+    ? 'Программа создаст встречу в вашем Zoom, сама зайдёт в неё и покажет запись'
+    : 'Сначала подключите аккаунт Zoom — раздел <a href="#zoom" id="wizToZoom">«Zoom»</a>. Без него будет ссылка на наш сайт';
+  const toZoom = $('#wizToZoom'); if (toZoom) toZoom.onclick = (e) => { e.preventDefault(); $('#wizModal').classList.add('hidden'); openTab('zoom'); };
+  $('#wizForm').classList.remove('hidden'); $('#wizResult').classList.add('hidden');
+  $('#wizSubmit').disabled = false;
+  $('#wizModal').classList.remove('hidden');
+  $('#wizName').focus();
+};
+$('#wizForm').onsubmit = async (e) => {
+  e.preventDefault();
+  if (!$('#wizRec').value) return toast('Сначала загрузите запись в разделе «Записи»');
+  if ($('#wizZoom').checked && !zoomAccount?.connected) return toast('Подключите аккаунт Zoom в разделе «Zoom» или снимите галочку');
+  const startAt = new Date($('#wizStart').value);
+  if ($('#wizRepeat').value === 'none' && startAt < Date.now()) return toast('Время начала уже прошло');
+  $('#wizSubmit').disabled = true;
+  $('#wizSubmit').innerHTML = `${ic('clock')}Создаю…`;
+  try {
+    const zoom = $('#wizZoom').checked;
+    const room = await api('/api/rooms', { method: 'POST', body: {
+      name: $('#wizName').value,
+      playback: { recordingId: $('#wizRec').value, startMode: 'scheduled', startAt: startAt.toISOString(), repeat: $('#wizRepeat').value, tzOffset: new Date().getTimezoneOffset() },
+      zoom: zoom ? { auto: true, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } : undefined,
+    } });
+    $('#wizForm').classList.add('hidden'); $('#wizResult').classList.remove('hidden');
+    $('#wizInvite').value = inviteText(room);
+    $('#wizWarn').textContent = room.zoom?.syncError ? `Zoom-встречу создать не удалось: ${room.zoom.syncError}. Встреча сохранена — повторить можно на пульте.` : '';
+    $('#wizPult').href = `/admin/room/${encodeURIComponent(room.id)}`;
+    $('#wizCopy').onclick = () => copyText($('#wizInvite').value, 'Приглашение скопировано');
+    $('#wizCopyLink').onclick = () => copyText(meetingLink(room), 'Ссылка скопирована');
+  } catch (err) { toast(err.message); }
+  $('#wizSubmit').disabled = false;
+  $('#wizSubmit').innerHTML = `${ic('sparkles')}Создать и получить ссылку`;
+};
+
+// ---------- Аккаунт Zoom ----------
+async function loadZoomAccount() {
+  const a = await api('/api/zoom/account');
+  zoomAccount = a;
+  $('#zaBadge').className = 'badge ' + (a.connected ? 'ok' : 'warn');
+  $('#zaBadge').textContent = a.connected ? 'подключён' : 'не подключён';
+  $('#zaAccount').value = a.accountId || '';
+  $('#zaClient').value = a.clientId || '';
+  $('#zaEmail').value = a.hostEmail || '';
+  $('#zaSecret').value = '';
+  $('#zaSecret').placeholder = a.connected ? 'сохранён — введите, чтобы заменить' : '';
+  $('#zaSecret').required = !a.connected;
+  $('#zaOff').classList.toggle('hidden', !a.connected);
+  $('#zaStatus').innerHTML = a.connected && a.user ? `${ic('check', 'sm')} Встречи создаются в аккаунте <b>${esc(a.user.name || '')}</b> ${esc(a.user.email || '')}` : '';
+}
+$('#zaForm').onsubmit = async (e) => {
+  e.preventDefault();
+  $('#zaStatus').textContent = 'Проверяю…';
+  try {
+    await api('/api/zoom/account', { method: 'PUT', body: { accountId: $('#zaAccount').value, clientId: $('#zaClient').value, clientSecret: $('#zaSecret').value, hostEmail: $('#zaEmail').value } });
+    toast('Zoom подключён');
+    loadZoomAccount();
+  } catch (err) { $('#zaStatus').innerHTML = `<span style="color:#ff8a95">${esc(err.message)}</span>`; }
+};
+$('#zaOff').onclick = async () => {
+  if (!confirm('Отключить аккаунт Zoom? Уже созданные встречи и ссылки останутся.')) return;
+  await api('/api/zoom/account', { method: 'DELETE' });
+  loadZoomAccount();
 };
 
 setInterval(() => { if (!$('#tab-rooms').classList.contains('hidden')) loadRooms().catch(() => {}); }, 5000);

@@ -7,6 +7,7 @@ const { execFile } = require('child_process');
 const multer = require('multer');
 const { Server } = require('socket.io');
 const db = require('./lib/db');
+const zoomApi = require('./lib/zoom-api');
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_LOGIN = (process.env.ADMIN_LOGIN || 'admin').toLowerCase();
@@ -238,9 +239,53 @@ const roomView = (r) => ({ ...r, live: liveSummary(r.id), nextStart: nextOccurre
 
 app.get('/api/rooms', requireAdmin, (req, res) => res.json(db.listRooms(req.user.id).map(roomView)));
 
-app.post('/api/rooms', requireAdmin, (req, res) => {
-  const room = db.createRoom(req.user.id, String(req.body?.name || '').trim().slice(0, 100));
-  res.json(room);
+// Новая встреча. Можно сразу передать показ записи и { zoom: { auto: true } } —
+// тогда встреча в Zoom создаётся сама и ссылка приходит в ответе (мастер «Новый автовебинар»).
+app.post('/api/rooms', requireAdmin, async (req, res) => {
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  const rid = b.playback?.recordingId;
+  if (rid && !ownRecording(req.user, rid)) return res.status(400).json({ error: 'Запись не найдена' });
+  let room = db.createRoom(req.user.id, str(b.name).trim().slice(0, 100));
+  if (b.playback || b.settings || b.zoom) {
+    room = db.updateRoom(room.id, { playback: b.playback, settings: b.settings, zoom: b.zoom });
+    onRoomUpdated(room.id);
+  }
+  if (room.zoom.auto) await syncZoomMeeting(room.id);
+  res.json(roomView(db.getRoom(room.id)));
+});
+
+// ---------- Zoom API: аккаунт Zoom админа (для автоматического создания встреч) ----------
+const zoomAccountView = (cfg) => (cfg
+  ? { connected: true, accountId: cfg.accountId, clientId: cfg.clientId, hostEmail: cfg.hostEmail || '', user: cfg.user || null }
+  : { connected: false });
+
+app.get('/api/zoom/account', requireAdmin, (req, res) => res.json(zoomAccountView(db.getZoomApi(req.user.id))));
+
+app.put('/api/zoom/account', requireAdmin, async (req, res) => {
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  const old = db.getZoomApi(req.user.id);
+  const cfg = {
+    accountId: str(b.accountId).trim().slice(0, 100),
+    clientId: str(b.clientId).trim().slice(0, 100),
+    clientSecret: str(b.clientSecret).trim().slice(0, 200) || (old?.clientId === str(b.clientId).trim() ? old.clientSecret : ''),
+    hostEmail: str(b.hostEmail).trim().slice(0, 200),
+  };
+  if (!cfg.accountId || !cfg.clientId || !cfg.clientSecret) return res.status(400).json({ error: 'Заполните Account ID, Client ID и Client Secret' });
+  try {
+    cfg.user = await zoomApi.test(cfg);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  delete cfg._host;
+  db.setZoomApi(req.user.id, cfg);
+  // встречи, которые ждали подключения, создаём сейчас
+  for (const room of db.listRooms(req.user.id)) if (room.zoom.auto && !room.zoom.meetingId) syncZoomMeeting(room.id);
+  res.json(zoomAccountView(cfg));
+});
+
+app.delete('/api/zoom/account', requireAdmin, (req, res) => {
+  db.setZoomApi(req.user.id, null);
+  res.json({ connected: false });
 });
 
 app.post('/api/rooms/:id/duplicate', requireAdmin, (req, res) => {
@@ -255,17 +300,26 @@ app.get('/api/rooms/:id', requireAdmin, (req, res) => {
   if (room) res.json(roomView(room));
 });
 
-app.put('/api/rooms/:id', requireAdmin, (req, res) => {
+app.put('/api/rooms/:id', requireAdmin, async (req, res) => {
   if (!ownRoom(req, res)) return;
   const rid = req.body?.playback?.recordingId;
   if (rid && !ownRecording(req.user, rid)) return res.status(400).json({ error: 'Запись не найдена' });
-  const room = db.updateRoom(req.params.id, req.body || {});
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const before = db.getRoom(req.params.id).zoom.auto;
+  const room = db.updateRoom(req.params.id, body);
   onRoomUpdated(room.id);
-  res.json(roomView(room));
+  // изменились название, расписание или включили автосоздание — обновляем встречу в Zoom
+  if (room.zoom.auto && (body.playback || body.name || (body.zoom?.auto && !before))) await syncZoomMeeting(room.id);
+  res.json(roomView(db.getRoom(room.id)));
 });
 
-app.delete('/api/rooms/:id', requireAdmin, (req, res) => {
-  if (!ownRoom(req, res)) return;
+app.delete('/api/rooms/:id', requireAdmin, async (req, res) => {
+  const room = ownRoom(req, res);
+  if (!room) return;
+  const cfg = db.getZoomApi(room.ownerId);
+  if (room.zoom.auto && room.zoom.meetingId && cfg) {
+    await zoomApi.remove(cfg, room.zoom.meetingId).catch((e) => console.log(`ZOOM API: не удалось удалить встречу ${room.zoom.meetingId}: ${e.message}`));
+  }
   endMeeting(req.params.id, 'Встреча завершена организатором');
   db.deleteRoom(req.params.id);
   lives.delete(req.params.id);
@@ -487,6 +541,54 @@ app.post('/api/zoom/report', requireRunner, (req, res) => {
   // пульты встреч с Zoom обновляем, чтобы статус был живым
   for (const room of db.listRooms()) if (room.zoom?.enabled || zoomTests.has(room.id)) notifyAdmins(room.id);
 });
+
+// ---------- Автосоздание встреч в Zoom ----------
+// По названию и расписанию встречи создаёт (или обновляет) встречу в Zoom-аккаунте админа,
+// ссылку сохраняет во встречу и включает показ в Zoom. Вызовы на одну встречу идут по очереди.
+const zoomSyncQueue = new Map();
+function syncZoomMeeting(roomId) {
+  const prev = zoomSyncQueue.get(roomId) || Promise.resolve();
+  const next = prev.then(() => doSyncZoomMeeting(roomId)).catch(() => {});
+  zoomSyncQueue.set(roomId, next);
+  next.then(() => { if (zoomSyncQueue.get(roomId) === next) zoomSyncQueue.delete(roomId); });
+  return next;
+}
+
+async function doSyncZoomMeeting(roomId) {
+  const room = db.getRoom(roomId);
+  if (!room?.zoom.auto) return;
+  const cfg = db.getZoomApi(room.ownerId);
+  if (!cfg) {
+    db.setRoomZoom(roomId, { syncError: 'Подключите аккаунт Zoom (раздел «Zoom» в меню админки)' });
+    return notifyAdmins(roomId);
+  }
+  const rec = db.getRecording(room.playback.recordingId);
+  const body = zoomApi.meetingBody({
+    topic: room.name, playback: room.playback, durationSec: rec?.duration,
+    timezone: room.zoom.timezone, nextStart: nextOccurrence(room.playback, Date.now()),
+  });
+  try {
+    let m = null;
+    if (room.zoom.meetingId) {
+      try { m = await zoomApi.update(cfg, room.zoom.meetingId, body); } catch (e) { if (e.status !== 404) throw e; }
+    }
+    if (!m) m = await zoomApi.create(cfg, body);
+    db.setRoomZoom(roomId, { meetingId: String(m.id), link: m.join_url, password: m.password || '', enabled: true, syncError: '', syncedAt: Date.now() });
+    console.log(`ZOOM API: встреча «${room.name}» → ${m.join_url}`);
+  } catch (e) {
+    db.setRoomZoom(roomId, { syncError: e.message });
+    console.log(`ZOOM API: «${room.name}»: ${e.message}`);
+  }
+  notifyAdmins(roomId);
+}
+
+// повторяющимся встречам раз в сутки сдвигаем начало на ближайший запуск — повторы не кончаются, ссылка та же
+setInterval(() => {
+  for (const room of db.listRooms()) {
+    if (room.zoom.auto && room.zoom.meetingId && room.playback.startMode === 'scheduled' && room.playback.repeat !== 'none'
+      && Date.now() - (room.zoom.syncedAt || 0) > 20 * 3600_000) syncZoomMeeting(room.id);
+  }
+}, 3600_000).unref();
 
 // ---------- Диагностика ----------
 // Браузеры участников сообщают о проблемах (видео не грузится, обрыв соединения, нет доступа к камере).

@@ -83,12 +83,28 @@ $('#zoomEnabled').onchange = () => {
   saveZoom({ enabled: $('#zoomEnabled').checked, link: $('#zoomLink').value });
 };
 
+$('#zoomAuto').onchange = async () => {
+  const on = $('#zoomAuto').checked;
+  if (on) toast('Создаю встречу в Zoom…');
+  try {
+    const room = await api(`/api/rooms/${roomId}`, { method: 'PUT', body: { zoom: { auto: on, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } } });
+    if (on && room.zoom.link && !room.zoom.syncError) { $('#zoomLink').value = room.zoom.link; toast('Встреча в Zoom создана — ссылка ниже'); }
+    else if (room.zoom.syncError) toast(room.zoom.syncError, 6000);
+  } catch (e) { toast(e.message); }
+};
+$('#zoomInvite').onclick = () => state && copyText(inviteText({ ...state.room, nextStart: state.room.nextStart }), 'Приглашение скопировано');
+
 $('#zoomTest').onclick = () => emit('admin:zoom-test', { on: !state?.zoomTest });
 
 function renderZoom() {
   const z = state.room.zoom || { enabled: false, link: '' };
-  if (!zoomFilled) { $('#zoomLink').value = z.link || ''; zoomFilled = true; }
+  if (!zoomFilled || (z.auto && document.activeElement !== $('#zoomLink'))) { $('#zoomLink').value = z.link || ''; zoomFilled = true; }
   $('#zoomEnabled').checked = !!z.enabled;
+  $('#zoomAuto').checked = !!z.auto;
+  $('#zoomLink').readOnly = !!z.auto;
+  $('#zoomSave').classList.toggle('hidden', !!z.auto);
+  $('#zoomSyncErr').classList.toggle('hidden', !z.syncError);
+  $('#zoomSyncErr').textContent = z.syncError ? 'Zoom: ' + z.syncError : '';
   $('#zoomTest').innerHTML = state.zoomTest ? `${ic('square')}Закончить тест` : `${ic('play')}Тест без входа в Zoom`;
   $('#zoomTestHint').textContent = state.zoomTest ? 'Тест: запись идёт в OBS, в Zoom пульт не заходит. Смотрите окно OBS на сервере.' : '';
   const r = state.zoomRunner || { online: false };

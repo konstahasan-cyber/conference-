@@ -224,3 +224,28 @@ window.ROOM_SWITCHES = [
 window.switchesHtml = (settings, attr = 'data-set') => ROOM_SWITCHES.map(([k, title, desc]) => `
   <label class="switch"><span class="txt"><b>${title}</b><span>${desc}</span></span>
   <input type="checkbox" ${attr}="${k}" ${settings[k] ? 'checked' : ''}><span class="knob"></span></label>`).join('');
+
+// ---------- Приглашение на встречу (текст, который админ отправляет участникам) ----------
+window.copyText = async (text, okMsg = 'Скопировано') => {
+  try { await navigator.clipboard.writeText(text); toast(okMsg); } catch { prompt('Скопируйте:', text); }
+};
+window.meetingLink = (room) => (room.zoom?.enabled && room.zoom.link ? room.zoom.link : `${location.origin}/r/${room.id}`);
+window.inviteText = (room) => {
+  const pb = room.playback || {};
+  const lines = [`Приглашаем на вебинар «${room.name}»`];
+  const when = pb.startMode === 'scheduled' && (room.nextStart || pb.startAt);
+  if (when) {
+    const d = new Date(when);
+    const off = -d.getTimezoneOffset();
+    const tz = off === 180 ? 'по Москве' : `UTC${off >= 0 ? '+' : '−'}${Math.floor(Math.abs(off) / 60)}${Math.abs(off) % 60 ? ':' + String(Math.abs(off) % 60).padStart(2, '0') : ''}`;
+    const day = d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+    const time = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const rep = { daily: 'каждый день', weekdays: 'по будням', weekly: `каждую неделю, ${d.toLocaleDateString('ru-RU', { weekday: 'long' })}` }[pb.repeat];
+    lines.push(`Когда: ${day}, ${time} (${tz})${rep ? ` — повторяется ${rep}` : ''}`);
+  }
+  lines.push(`Ссылка: ${meetingLink(room)}`);
+  if (room.zoom?.enabled && room.zoom.meetingId) {
+    lines.push(`Идентификатор конференции: ${String(room.zoom.meetingId).replace(/(\d{3})(\d{3,4})(\d{4})$/, '$1 $2 $3')}${room.zoom.password ? `, код доступа: ${room.zoom.password}` : ''}`);
+  }
+  return lines.join('\n');
+};
