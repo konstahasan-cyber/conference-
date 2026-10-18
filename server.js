@@ -123,6 +123,51 @@ app.patch('/api/me', requireAdmin, (req, res) => {
   res.json({ ok: true, name });
 });
 
+// ---------- LiveKit: видео участников идёт через медиасервер, а не напрямую между браузерами ----------
+// Включается переменными LIVEKIT_URL (публичный wss-адрес), LIVEKIT_KEY, LIVEKIT_SECRET и LIVEKIT_API_URL (внутренний http).
+// Без них работает прежний режим «напрямую между браузерами».
+const LK = (() => {
+  const { LIVEKIT_URL, LIVEKIT_KEY, LIVEKIT_SECRET } = process.env;
+  if (!LIVEKIT_URL || !LIVEKIT_KEY || !LIVEKIT_SECRET) return null;
+  const { AccessToken, RoomServiceClient, TrackSource } = require('livekit-server-sdk');
+  const apiUrl = process.env.LIVEKIT_API_URL || LIVEKIT_URL.replace(/^ws/, 'http');
+  const svc = new RoomServiceClient(apiUrl, LIVEKIT_KEY, LIVEKIT_SECRET);
+  // что участнику можно публиковать; пустой список в LiveKit значит «всё можно», поэтому тогда canPublish=false
+  const permission = (p, perms) => {
+    const src = [];
+    if (!p.hidden) {
+      if (perms.allowCam) src.push(TrackSource.CAMERA);
+      if (perms.allowMic) src.push(TrackSource.MICROPHONE);
+      if (p.role === 'host') src.push(TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO);
+    }
+    return { canSubscribe: true, canPublish: src.length > 0, canPublishSources: src, canPublishData: false, hidden: !!p.hidden };
+  };
+  return {
+    url: LIVEKIT_URL,
+    async token(roomId, p, perms) {
+      const at = new AccessToken(LIVEKIT_KEY, LIVEKIT_SECRET, { identity: p.id, name: p.name, ttl: '12h', metadata: JSON.stringify({ role: p.role }) });
+      at.addGrant({ room: roomId, roomJoin: true, ...permission(p, perms) });
+      return at.toJwt();
+    },
+    // права меняются на сервере LiveKit сразу — запрещённую камеру/микрофон он отключает сам
+    updatePerms(roomId, p, perms) {
+      svc.updateParticipant(roomId, p.id, { permission: permission(p, perms) }).catch(() => {});
+    },
+    remove(roomId, identity) {
+      svc.removeParticipant(roomId, identity).catch(() => {});
+    },
+  };
+})();
+if (LK) console.log('Видео участников: через LiveKit (' + LK.url + ')');
+
+function sendLiveKitToken(socket, roomId, p) {
+  if (!LK) return;
+  const room = db.getRoom(roomId);
+  LK.token(roomId, p, effectivePerms(room, p))
+    .then((token) => socket.emit('lk', { url: LK.url, token }))
+    .catch((e) => console.error('LiveKit token:', e.message));
+}
+
 app.get('/api/config', (req, res) => {
   const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
   if (process.env.TURN_URL) {
@@ -132,7 +177,7 @@ app.get('/api/config', (req, res) => {
       credential: process.env.TURN_PASS,
     });
   }
-  res.json({ iceServers });
+  res.json({ iceServers, livekit: !!LK });
 });
 
 // ---------- Админы (только главный) ----------
@@ -299,7 +344,8 @@ function transcodeRecording(rec) {
       '-maxrate', '1800k', '-bufsize', '3600k', '-g', '48', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
     args.push('-movflags', '+faststart', dst);
     // перекодирование — с низким приоритетом, чтобы не мешать встречам
-    const [cmd, cmdArgs] = compatible ? ['ffmpeg', args] : ['nice', ['-n', '15', 'ffmpeg', ...args]];
+    const lowPriority = !compatible && process.platform !== 'win32'; // на Windows нет команды nice
+    const [cmd, cmdArgs] = lowPriority ? ['nice', ['-n', '15', 'ffmpeg', ...args]] : ['ffmpeg', args];
     execFile(cmd, cmdArgs, { timeout: 6 * 3600_000 }, (err) => {
       if (err || !db.getRecording(rec.id)) { fs.rm(dst, () => {}); return; }
       execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', dst], (e2, dout) => {
@@ -468,6 +514,7 @@ app.get('/apple-emoji/:code.png', async (req, res) => {
   }
 });
 
+app.use('/vendor/livekit', express.static(path.join(__dirname, 'node_modules', 'livekit-client', 'dist'), { maxAge: '7d', index: false }));
 app.use('/media', express.static(db.UPLOAD_DIR, { maxAge: '1h', index: false }));
 
 // ---------- Страницы ----------
@@ -724,7 +771,7 @@ function endMeeting(roomId, reason) {
     s?.emit('meeting-ended', { reason });
     s?.leave(roomId);
     if (s) s.data.roomId = null;
-    live.participants.delete(id);
+    if (live.participants.delete(id)) LK?.remove(roomId, id);
     live.waiting.delete(id);
     io.to(roomId).emit('peer-left', { id });
   }
@@ -761,6 +808,7 @@ function enforcePerms(room, p) {
   const perms = effectivePerms(room, p);
   if (!perms.allowCam) { p.cam = false; p.screen = false; }
   if (!perms.allowMic) p.mic = false;
+  if (LK && p.role !== 'host') LK.updatePerms(room.id, p, perms);
 }
 
 // Автоматический запуск записи по расписанию (в т.ч. повторяющемуся)
@@ -830,6 +878,7 @@ function admit(socket, roomId, { name, role, hidden, camOverride = null, micOver
     rejoin: p.rejoin,
   });
   socket.to(roomId).emit('peer-joined', publicParticipant(room, p));
+  sendLiveKitToken(socket, roomId, p);
   if (role === 'guest') maybeFirstGuestStart(roomId);
   notifyAdmins(roomId);
 }
@@ -856,6 +905,7 @@ function removeParticipant(roomId, id, { keepRejoin = false } = {}) {
   const p = live.participants.get(id);
   if (p) {
     live.participants.delete(id);
+    LK?.remove(roomId, id);
     if (keepRejoin && live.rejoin?.has(p.rejoin)) live.rejoin.get(p.rejoin).expires = Date.now() + REJOIN_TTL;
     else live.rejoin?.delete(p.rejoin);
     io.to(roomId).emit('peer-left', { id });

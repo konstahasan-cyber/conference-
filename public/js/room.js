@@ -58,6 +58,7 @@ function ensureAudioCtx() {
       loadEmojis(roomId),
     ]);
     S.iceServers = cfg.iceServers;
+    S.lkMode = !!cfg.livekit; // видео участников через медиасервер LiveKit
     api('/api/me').then((m) => (S.isAdmin = m.admin)).catch(() => {});
     S.isOwner = info.isOwner;
     // админ по умолчанию входит невидимо (автовебинар); ?live=1 — сразу «в эфир»
@@ -297,6 +298,7 @@ function setReconnectBanner(on) { $('#reconnectBanner').classList.toggle('hidden
 
 function startReconnecting() {
   S.reconnecting = true;
+  lkDisconnect(); // после переподключения сервер выдаст новый пропуск в LiveKit
   for (const id of [...S.peers.keys()]) removePeer(id);
   setReconnectBanner(true);
   clearTimeout(reconnectTimer);
@@ -346,6 +348,7 @@ function show(view) {
 }
 
 function showEnd(title, text) {
+  lkDisconnect();
   if (REC.recorder) stopHostRecording();
   S.joined = false;
   S.waiting = false;
@@ -502,8 +505,129 @@ function addPeer(info) {
   if (!peer) {
     peer = { info, pc: null, stream: new MediaStream(), chain: Promise.resolve(), pending: [] };
     S.peers.set(info.id, peer);
+    if (lkTracks.has(info.id)) peer.stream = new MediaStream([...lkTracks.get(info.id)]);
   } else peer.info = info;
   return peer;
+}
+
+// ---------- LiveKit ----------
+let lkRoom = null;
+let lkChain = Promise.resolve();
+const lkTracks = new Map(); // identity участника -> Set(MediaStreamTrack), в т.ч. пришедшие раньше, чем сокет сообщил об участнике
+S.lkPub = { audio: null, video: null };
+
+socket.on('lk', ({ url, token }) => lkConnect(url, token));
+
+function lkApplyTracks(id) {
+  const peer = S.peers.get(id);
+  if (!peer) return;
+  // новый объект MediaStream — чтобы плитка точно переподключила источник
+  peer.stream = new MediaStream([...(lkTracks.get(id) || [])].filter((t) => t.readyState === 'live'));
+  layout();
+  const t = S.tiles.get(id);
+  if (t) safePlay(t.video);
+}
+
+async function lkConnect(url, token) {
+  if (!window.LivekitClient) { report('lk-error', 'библиотека LiveKit не загрузилась', 'lk-lib'); return; }
+  lkDisconnect();
+  const { Room, RoomEvent } = LivekitClient;
+  const room = new Room({
+    adaptiveStream: false, // плитки рисуем сами, поэтому качество выбираем вручную (lkTuneQuality)
+    dynacast: true,        // не тратить канал на слои, которые никто не смотрит
+    disconnectOnPageLeave: true,
+    publishDefaults: { simulcast: true, videoCodec: 'vp8' },
+  });
+  lkRoom = room;
+  S.lkPub = { audio: null, video: null };
+  room.on(RoomEvent.TrackSubscribed, (track, pub, part) => {
+    const set = lkTracks.get(part.identity) || new Set();
+    set.add(track.mediaStreamTrack);
+    lkTracks.set(part.identity, set);
+    track.mediaStreamTrack.addEventListener('unmute', () => layout());
+    track.mediaStreamTrack.addEventListener('mute', () => layout());
+    lkApplyTracks(part.identity);
+    lkTuneQuality();
+  });
+  room.on(RoomEvent.TrackUnsubscribed, (track, pub, part) => {
+    lkTracks.get(part.identity)?.delete(track.mediaStreamTrack);
+    lkApplyTracks(part.identity);
+  });
+  room.on(RoomEvent.ParticipantDisconnected, (part) => lkTracks.delete(part.identity));
+  room.on(RoomEvent.ConnectionQualityChanged, (q, part) => {
+    const peer = S.peers.get(part.identity);
+    if (peer && peer.lkQuality !== q) { peer.lkQuality = q; layout(); }
+  });
+  room.on(RoomEvent.Disconnected, (reason) => {
+    if (lkRoom === room && S.joined && !S.reconnecting) report('lk-disconnected', `причина ${reason}`);
+  });
+  room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+    if (!room.canPlaybackAudio) $('#unmuteBtn').classList.remove('hidden');
+  });
+  try {
+    await room.connect(url, token, { autoSubscribe: true });
+  } catch (e) {
+    if (lkRoom !== room) return;
+    report('lk-connect-failed', e?.message || String(e));
+    toast('Не удалось подключить видео участников — проверьте интернет. Запись при этом идёт.', 6000);
+    return;
+  }
+  if (lkRoom !== room) { room.disconnect(); return; }
+  await lkSync();
+}
+
+function lkDisconnect() {
+  const room = lkRoom;
+  lkRoom = null;
+  lkTracks.clear();
+  S.lkPub = { audio: null, video: null };
+  if (room) room.disconnect(false).catch?.(() => {});
+}
+
+// публикуем в LiveKit ровно то, что включено у нас: микрофон и камеру (или экран вместо камеры)
+function lkSync() {
+  lkChain = lkChain.then(async () => {
+    const room = lkRoom;
+    if (!room || room.state !== 'connected') return;
+    const { Track } = LivekitClient;
+    const want = { audio: S.local.audio, video: currentVideoTrack() };
+    for (const kind of ['audio', 'video']) {
+      const track = want[kind];
+      const source = kind === 'audio' ? Track.Source.Microphone : S.local.screen ? Track.Source.ScreenShare : Track.Source.Camera;
+      const cur = S.lkPub[kind];
+      if (cur && cur.track === track && cur.source === source) continue;
+      if (cur) {
+        S.lkPub[kind] = null;
+        try { await room.localParticipant.unpublishTrack(cur.track, false); } catch (e) {}
+      }
+      if (track && track.readyState === 'live') {
+        try {
+          await room.localParticipant.publishTrack(track, { source, simulcast: kind === 'video' && source === Track.Source.Camera, name: kind });
+          S.lkPub[kind] = { track, source };
+        } catch (e) {
+          report('lk-publish-failed', `${kind}: ${e?.message || e}`, `lkpub-${kind}`);
+        }
+      }
+    }
+  }).catch(() => {});
+  return lkChain;
+}
+
+// чем больше плиток — тем меньший слой видео запрашиваем (экономит интернет зрителей)
+let lkQualityTimer = null;
+function lkTuneQuality() {
+  clearTimeout(lkQualityTimer);
+  lkQualityTimer = setTimeout(() => {
+    if (!lkRoom) return;
+    const { VideoQuality, Track } = LivekitClient;
+    const tiles = S.tiles.size;
+    const q = tiles <= 4 ? VideoQuality.HIGH : tiles <= 9 ? VideoQuality.MEDIUM : VideoQuality.LOW;
+    for (const part of lkRoom.remoteParticipants.values()) {
+      for (const pub of part.videoTrackPublications.values()) {
+        try { pub.setVideoQuality(pub.source === Track.Source.ScreenShare ? VideoQuality.HIGH : q); } catch (e) {}
+      }
+    }
+  }, 300);
 }
 
 function removePeer(id) {
@@ -521,6 +645,7 @@ function removePeer(id) {
 
 // битрейт видео под число участников (модуль net-quality.js)
 function tuneNet() {
+  if (S.lkMode) return; // в LiveKit качество подстраивает сервер
   const pcs = [...S.peers.values()].map((p) => p.pc).filter(Boolean);
   try { window.NetQuality?.tune?.(pcs, { screen: !!S.local.screen }); } catch (e) { console.warn('tune', e); }
 }
@@ -608,6 +733,7 @@ async function flushCandidates(peer) {
 }
 
 function replaceAll(kind, track) {
+  if (S.lkMode) { lkSync(); return; }
   for (const peer of S.peers.values()) {
     const t = peer.pc?.getTransceivers().find((x) => x.receiver.track.kind === kind);
     t?.sender.replaceTrack(track).catch(() => {});
@@ -629,7 +755,7 @@ function sendMedia() {
 const hasMedia = (info) => !!(info && (info.cam || info.mic || info.screen));
 const selfHasMedia = () => !!(S.local.audio || S.local.video || S.local.screen);
 function ensureConnections() {
-  if (!S.joined || S.reconnecting) return;
+  if (!S.joined || S.reconnecting || S.lkMode) return;
   for (const [id, peer] of S.peers) {
     // кто звонит — решаем одинаково на обеих сторонах, чтобы не позвонить друг другу одновременно
     peer.initiate = socket.id < id;
@@ -652,6 +778,7 @@ function safePlay(el) {
 }
 $('#unmuteBtn').onclick = () => {
   ensureAudioCtx();
+  lkRoom?.startAudio?.().catch(() => {});
   pbVideo.muted = false;
   for (const el of blockedMedia) el.play().catch(() => {});
   blockedMedia.clear();
@@ -1057,7 +1184,7 @@ function layout() {
     const t = ensureTile(p.info.id);
     // видео показываем только когда реально идут кадры — иначе была бы чёрная плитка
     const hasVideo = p.info.cam && p.stream.getVideoTracks().some((tr) => tr.readyState === 'live' && !tr.muted);
-    const net = ['failed', 'disconnected'].includes(p.pc?.connectionState);
+    const net = S.lkMode ? p.lkQuality === 'lost' : ['failed', 'disconnected'].includes(p.pc?.connectionState);
     const waitingVideo = p.info.cam && !hasVideo && !net;
     setTile(t, { name: p.info.name, cam: hasVideo, mic: p.info.mic, hand: p.info.hand, stream: p.stream, net: net || waitingVideo, netText: net ? 'связь' : 'видео загружается…' });
     keys.push(p.info.id);
@@ -1113,6 +1240,7 @@ function layout() {
   stage.classList.toggle('hidden', !stageOn);
   $('#content').classList.toggle('with-stage', stageOn);
   sizeGrid(keys.length, stageOn);
+  if (S.lkMode) lkTuneQuality();
   renderPeople();
 }
 
